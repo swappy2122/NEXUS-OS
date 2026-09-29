@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nexus-os"
+version = "0.1.0"
+description = "AI-first VR operating environment"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [
+    { name = "NEXUS OS Contributors" }
+]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: System :: Operating System",
+]
+dependencies = [
+    "fastapi>=0.110.0",
+    "uvicorn[standard]>=0.29.0",
+    "pydantic>=2.7.0",
+    "httpx>=0.27.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = [
+    "core*",
+    "agents*",
+    "tools*",
+    "api*",
+    "security*",
+    "context*",
+    "models*",
+    "voice*",
+    "vr*",
+]

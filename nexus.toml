@@ -1,0 +1,10 @@
+# NEXUS OS Configuration
+# Override any setting with environment variables (NEXUS_ prefix).
+
+[nexus]
+env = "development"
+log_level = "INFO"
+data_dir = "./data"
+enable_security = true
+default_model = "llama3.2"
+ollama_base_url = "http://localhost:11434"
