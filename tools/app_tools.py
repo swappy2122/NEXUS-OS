@@ -9,7 +9,6 @@ Provides safe, structured OS-level functions and tools for:
 """
 
 from __future__ import annotations
-
 import asyncio
 import os
 import shutil
@@ -18,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from core.types import ToolResult
+from security.models import ActionCategory, RiskLevel
 from tools.base import BaseTool
 
 # ---------------------------------------------------------------------------
@@ -458,6 +458,8 @@ class AppListInstalledTool(BaseTool):
         "application entry directories."
     )
     required_permissions = ["app.list"]
+    action_category = ActionCategory.READ_ONLY
+    risk_level = RiskLevel.LOW
     parameters_schema = {
         "type": "object",
         "properties": {
@@ -496,6 +498,8 @@ class AppListRunningTool(BaseTool):
         "List currently running applications and processes on the host system."
     )
     required_permissions = ["app.list"]
+    action_category = ActionCategory.READ_ONLY
+    risk_level = RiskLevel.LOW
     parameters_schema = {
         "type": "object",
         "properties": {
@@ -534,6 +538,8 @@ class AppIsRunningTool(BaseTool):
         "Check whether a specific application or PID is currently running."
     )
     required_permissions = ["app.list"]
+    action_category = ActionCategory.READ_ONLY
+    risk_level = RiskLevel.LOW
     parameters_schema = {
         "type": "object",
         "properties": {
@@ -574,6 +580,8 @@ class AppOpenTool(BaseTool):
         "Launch an application on the host system by executable name or path."
     )
     required_permissions = ["app.open"]
+    action_category = ActionCategory.NORMAL
+    risk_level = RiskLevel.LOW
     parameters_schema = {
         "type": "object",
         "properties": {
@@ -623,6 +631,8 @@ class AppCloseTool(BaseTool):
         "Requires user confirmation."
     )
     required_permissions = ["app.close"]
+    action_category = ActionCategory.SENSITIVE
+    risk_level = RiskLevel.MEDIUM
     parameters_schema = {
         "type": "object",
         "properties": {

@@ -8,3 +8,28 @@ data_dir = "./data"
 enable_security = true
 default_model = "llama3.2"
 ollama_base_url = "http://localhost:11434"
+
+# Model Router — maps complexity tiers to registered backend names.
+# Backend names must match those passed to ModelRouter.register_backend().
+# strategy: "rule_based" (keyword heuristics) or "passthrough" (always standard).
+[routing]
+strategy = "rule_based"
+
+[routing.tiers]
+bypass   = "dev_backend"   # deterministic OS ops — no LLM call
+light    = "ollama"        # fast / cheap model
+standard = "ollama"        # default model
+heavy    = "ollama"        # most capable model
+
+# Voice Input Module
+[voice]
+enabled            = false                 # Activate voice input subsystem
+provider           = "dev"                 # "dev" (mock), "http" (OpenAI / Whisper)
+activation_mode    = "manual"              # "manual", "push_to_talk", "always_listening"
+sample_rate        = 16000                 # Audio frequency in Hz
+channels           = 1                     # 1 = mono, 2 = stereo
+max_record_seconds = 10.0                  # Max duration per recording
+stt_endpoint       = "http://localhost:8000/v1/audio/transcriptions"
+stt_model          = "whisper-1"
+language           = "en"
+auto_dispatch      = true                  # Automatically dispatch plain text to Supervisor

@@ -66,8 +66,12 @@ def bootstrap():
     logger.info("NEXUS OS v%s starting up (env=%s)", VERSION, config.env)
 
     # ── 2. Security ──────────────────────────────────────────────────────
-    permission_gate = PermissionGate(DEFAULT_POLICIES)
     audit_log = AuditLog(event_bus)
+    permission_gate = PermissionGate(
+        DEFAULT_POLICIES,
+        audit_log=audit_log,
+        event_bus=event_bus,
+    )
 
     # ── 3. Tools (system-wide registry for permission gating) ────────────
     tool_registry = ToolRegistry(permission_gate, event_bus)
@@ -134,10 +138,13 @@ def bootstrap():
     ])
     app_agent.register_tools([app_list_installed, app_list_running, app_is_running, app_open, app_close])
 
-    #   c) Inject LLM provider (ModelRouter satisfies LLMProvider protocol)
+    #   c) Inject LLM provider & security gate
     file_agent.set_llm(model_router)
+    file_agent.set_security_gate(permission_gate)
     system_agent.set_llm(model_router)
+    system_agent.set_security_gate(permission_gate)
     app_agent.set_llm(model_router)
+    app_agent.set_security_gate(permission_gate)
 
     #   d) Build agent registry
     agent_registry = AgentRegistry()

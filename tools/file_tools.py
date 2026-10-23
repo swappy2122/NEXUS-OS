@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from core.types import ToolResult
+from security.models import ActionCategory, RiskLevel
 from tools.base import BaseTool
 
 # ---------------------------------------------------------------------------
@@ -183,6 +184,8 @@ class FileReadTool(BaseTool):
     name = "file_read"
     description = "Read and return the text contents of a file at the given path."
     required_permissions = ["fs.read"]
+    action_category = ActionCategory.READ_ONLY
+    risk_level = RiskLevel.LOW
     parameters_schema = {
         "type": "object",
         "properties": {
@@ -231,6 +234,8 @@ class FileWriteTool(BaseTool):
     name = "file_write"
     description = "Write text content to a file, creating parent directories if needed."
     required_permissions = ["fs.write"]
+    action_category = ActionCategory.SENSITIVE
+    risk_level = RiskLevel.MEDIUM
     parameters_schema = {
         "type": "object",
         "properties": {
@@ -284,6 +289,8 @@ class FileSearchTool(BaseTool):
     name = "file_search"
     description = "Search for files matching a glob pattern under a base directory."
     required_permissions = ["fs.read"]
+    action_category = ActionCategory.READ_ONLY
+    risk_level = RiskLevel.LOW
     parameters_schema = {
         "type": "object",
         "properties": {
@@ -342,6 +349,8 @@ class FileMetadataTool(BaseTool):
     name = "file_metadata"
     description = "Retrieve structured metadata (size, timestamps, type, permissions) for a file or directory."
     required_permissions = ["fs.read"]
+    action_category = ActionCategory.READ_ONLY
+    risk_level = RiskLevel.LOW
     parameters_schema = {
         "type": "object",
         "properties": {
@@ -376,6 +385,8 @@ class FileOpenOSTool(BaseTool):
     name = "file_open_os"
     description = "Open a file or document using the operating system's default desktop handler."
     required_permissions = ["fs.read"]
+    action_category = ActionCategory.NORMAL
+    risk_level = RiskLevel.LOW
     parameters_schema = {
         "type": "object",
         "properties": {
@@ -410,6 +421,8 @@ class FileMkdirTool(BaseTool):
     name = "file_mkdir"
     description = "Create a new directory at the specified path."
     required_permissions = ["fs.write"]
+    action_category = ActionCategory.NORMAL
+    risk_level = RiskLevel.LOW
     parameters_schema = {
         "type": "object",
         "properties": {
@@ -449,6 +462,8 @@ class FileMoveTool(BaseTool):
     name = "file_move"
     description = "Move or rename a file or directory to a new destination path."
     required_permissions = ["fs.write"]
+    action_category = ActionCategory.SENSITIVE
+    risk_level = RiskLevel.MEDIUM
     parameters_schema = {
         "type": "object",
         "properties": {
@@ -494,6 +509,8 @@ class FileDeleteTool(BaseTool):
     name = "file_delete"
     description = "Delete a file at the given path. This action requires user confirmation."
     required_permissions = ["fs.delete"]
+    action_category = ActionCategory.DESTRUCTIVE
+    risk_level = RiskLevel.HIGH
     parameters_schema = {
         "type": "object",
         "properties": {

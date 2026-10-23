@@ -85,22 +85,40 @@ class ToolRegistry:
 
         Returns a ``ToolResult`` — never raises for expected failures.
         """
+        # Deny-by-default for unknown tools
         tool = self._tools.get(call.tool_name)
         if tool is None:
+            err_msg = f"[UNKNOWN_TOOL_DENIED][{call.calling_agent}][{call.tool_name}] Tool '{call.tool_name}' is unclassified or unregistered (denied by default)."
+            if hasattr(self._security, "_log_and_emit"):
+                self._security._log_and_emit(
+                    agent_role=call.calling_agent,
+                    tool_name=call.tool_name,
+                    arguments=call.arguments,
+                    decision="deny",
+                    error=err_msg,
+                )
             return ToolResult(
                 tool_name=call.tool_name,
                 success=False,
-                error=f"Unknown tool: {call.tool_name}",
+                error=err_msg,
             )
 
-        # Permission check
+        # Permission and safety check
         try:
-            self._security.check(
-                agent_role=call.calling_agent,
-                required_scopes=tool.required_permissions,
-                target_path=call.arguments.get("path"),
-            )
-        except PermissionDenied as exc:
+            if hasattr(self._security, "check_tool_async"):
+                await self._security.check_tool_async(
+                    agent_role=call.calling_agent,
+                    tool_name=tool.name,
+                    arguments=call.arguments,
+                    required_scopes=tool.required_permissions,
+                )
+            else:
+                self._security.check(
+                    agent_role=call.calling_agent,
+                    required_scopes=tool.required_permissions,
+                    target_path=call.arguments.get("path"),
+                )
+        except (PermissionDenied, Exception) as exc:
             return ToolResult(
                 tool_name=call.tool_name,
                 success=False,
@@ -123,6 +141,8 @@ class ToolRegistry:
 
         # Publish audit event
         if self._event_bus:
+            category_val = getattr(tool.action_category, "value", str(tool.action_category)) if hasattr(tool, "action_category") else None
+            risk_val = getattr(tool.risk_level, "value", str(tool.risk_level)) if hasattr(tool, "risk_level") else None
             await self._event_bus.publish(
                 "tool.executed",
                 {
@@ -132,6 +152,8 @@ class ToolRegistry:
                     "success": result.success,
                     "error": result.error,
                     "duration_ms": result.duration_ms,
+                    "action_category": category_val,
+                    "risk_level": risk_val,
                 },
             )
 

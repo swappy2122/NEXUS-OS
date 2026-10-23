@@ -30,3 +30,15 @@ htmlcov/
 logs/
 data/
 cache/
+
+# Unity generated folders & files
+/[Vv][Rr]/[Ll]ibrary/
+/[Vv][Rr]/[Tt]emp/
+/[Vv][Rr]/[Oo]bj/
+/[Vv][Rr]/[Bb]uild/
+/[Vv][Rr]/[Bb]uilds/
+/[Vv][Rr]/[Ll]ogs/
+/[Vv][Rr]/[Uu]ser[Ss]ettings/
+/[Vv][Rr]/[Mm]emoryCaptures/
+/[Vv][Rr]/*.csproj
+/[Vv][Rr]/*.sln

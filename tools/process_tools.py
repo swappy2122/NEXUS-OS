@@ -12,6 +12,7 @@ import shlex
 from typing import Any
 
 from core.types import ToolResult
+from security.models import ActionCategory, RiskLevel
 from tools.base import BaseTool
 
 
@@ -24,6 +25,8 @@ class ProcessRunTool(BaseTool):
         "Dangerous operations require user confirmation."
     )
     required_permissions = ["process.execute"]
+    action_category = ActionCategory.DESTRUCTIVE
+    risk_level = RiskLevel.HIGH
     parameters_schema = {
         "type": "object",
         "properties": {

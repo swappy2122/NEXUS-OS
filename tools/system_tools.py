@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from core.types import ToolResult
+from security.models import ActionCategory, RiskLevel
 from tools.base import BaseTool
 
 # ---------------------------------------------------------------------------
@@ -201,6 +202,8 @@ class SystemInfoTool(BaseTool):
         "memory usage, disk usage, and process summary."
     )
     required_permissions = ["system.read"]
+    action_category = ActionCategory.READ_ONLY
+    risk_level = RiskLevel.LOW
     parameters_schema = {
         "type": "object",
         "properties": {},
@@ -234,6 +237,8 @@ class SystemCpuTool(BaseTool):
     name = "system_cpu"
     description = "Retrieve read-only CPU usage, core counts, architecture, and load averages."
     required_permissions = ["system.read"]
+    action_category = ActionCategory.READ_ONLY
+    risk_level = RiskLevel.LOW
     parameters_schema = {
         "type": "object",
         "properties": {},

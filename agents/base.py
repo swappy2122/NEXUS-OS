@@ -90,8 +90,14 @@ class BaseAgent(ABC):
         # Internal state
         self._tools: dict[str, BaseTool] = {}
         self._llm: LLMProvider | None = None
+        self._security_gate: Any = None
         self._tool_call_log: list[ToolCallRecord] = []
         self._logger = logging.getLogger(f"nexus.agent.{name}")
+
+    def set_security_gate(self, gate: Any) -> None:
+        """Inject a PermissionGate to enforce security policies on tool execution."""
+        self._security_gate = gate
+        self._logger.debug("Security gate set: %s", type(gate).__name__)
 
     # ── Tool management ──────────────────────────────────────────────────
 
@@ -175,6 +181,43 @@ class BaseAgent(ABC):
 
         self._logger.info("Calling tool: %s(%s)", tool_name, _brief(kwargs))
         start = time.monotonic()
+
+        # Enforce security permission gate if configured
+        if self._security_gate is not None:
+            try:
+                if hasattr(self._security_gate, "check_tool_async"):
+                    await self._security_gate.check_tool_async(
+                        agent_role=self.name,
+                        tool_name=tool_name,
+                        arguments=kwargs,
+                        required_scopes=tool.required_permissions,
+                    )
+                else:
+                    self._security_gate.check(
+                        agent_role=self.name,
+                        required_scopes=tool.required_permissions,
+                        target_path=kwargs.get("path"),
+                    )
+            except Exception as exc:
+                elapsed_ms = (time.monotonic() - start) * 1000
+                sec_res = ToolResult(
+                    tool_name=tool_name,
+                    success=False,
+                    error=str(exc),
+                    duration_ms=elapsed_ms,
+                )
+                self._tool_call_log.append(
+                    ToolCallRecord(
+                        tool_name=tool_name,
+                        arguments=kwargs,
+                        success=False,
+                        output=None,
+                        error=sec_res.error,
+                        duration_ms=elapsed_ms,
+                    )
+                )
+                self._logger.warning("Security check blocked tool %s: %s", tool_name, exc)
+                return sec_res
 
         try:
             result = await tool.execute(**kwargs)

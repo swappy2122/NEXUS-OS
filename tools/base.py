@@ -18,12 +18,16 @@ from typing import Any
 from core.types import ToolResult
 
 
+from security.models import ActionCategory, RiskLevel
+
+
 class BaseTool(ABC):
     """Abstract Base Class for NEXUS OS Tools.
 
     Subclasses **must** set the class-level attributes ``name``,
     ``description``, ``parameters_schema``, and
-    ``required_permissions``.  They must also implement ``execute()``.
+    ``required_permissions``. They may also set ``action_category``
+    and ``risk_level``. They must implement ``execute()``.
     """
 
     # -- class-level metadata (override in subclasses) ---------------------
@@ -31,6 +35,8 @@ class BaseTool(ABC):
     description: str = ""
     parameters_schema: dict[str, Any] = {}
     required_permissions: list[str] = []
+    action_category: ActionCategory = ActionCategory.READ_ONLY
+    risk_level: RiskLevel = RiskLevel.LOW
 
     # -- LLM interop -------------------------------------------------------
 

@@ -28,9 +28,13 @@ from core.event_bus import EventBus
 from core.logger import setup_logger
 from models.dev_backend import DevModelBackend
 from models.router import ModelRouter
+from models.routing_strategy import DefaultPassthroughStrategy, RuleBasedStrategy
+from models.routing_types import ModelTierConfig
 from security.audit import AuditLog
 from security.permissions import PermissionGate
 from security.policy import DEFAULT_POLICIES
+from voice.service import VoiceInputService
+from voice.types import VoiceCommandResult
 from tools.app_tools import (
     AppCloseTool,
     AppIsRunningTool,
@@ -143,6 +147,7 @@ class NexusCore:
         context_manager: ContextManager,
         agent_registry: AgentRegistry,
         supervisor: SupervisorAgent,
+        voice_service: VoiceInputService | None = None,
     ) -> None:
         self.config = config
         self.event_bus = event_bus
@@ -153,6 +158,12 @@ class NexusCore:
         self.context_manager = context_manager
         self.agent_registry = agent_registry
         self.supervisor = supervisor
+        self.voice_service = voice_service or VoiceInputService(
+            config=config.voice,
+            core=self,
+            supervisor=supervisor,
+            event_bus=event_bus,
+        )
         self.start_time = datetime.now(timezone.utc)
         self._is_running = True
 
@@ -162,6 +173,7 @@ class NexusCore:
         config_path: Path | str | None = None,
         use_dev_model: bool = True,
         log_level: str | None = None,
+        confirmation_provider: Any = None,
     ) -> NexusCore:
         """Bootstrap and wire all NEXUS OS components in dependency order.
 
@@ -170,6 +182,7 @@ class NexusCore:
             use_dev_model: If True, uses the deterministic DevModelBackend
                            which requires no external LLM.
             log_level: Optional log level override (e.g. 'warning', 'info').
+            confirmation_provider: Optional ConfirmationProvider for sensitive/destructive actions.
         """
         # 1. Core Config & Event Bus
         cfg_file = Path(config_path) if config_path else Path("nexus.toml")
@@ -181,8 +194,13 @@ class NexusCore:
         logger.info("Initializing %s v%s (env=%s)", SYSTEM_NAME, VERSION, config.env)
 
         # 2. Security Gate & Audit Log
-        permission_gate = PermissionGate(DEFAULT_POLICIES)
         audit_log = AuditLog(event_bus)
+        permission_gate = PermissionGate(
+            DEFAULT_POLICIES,
+            confirmation_provider=confirmation_provider,
+            audit_log=audit_log,
+            event_bus=event_bus,
+        )
 
         # 3. Tool Registry & Instantiation
         tool_registry = ToolRegistry(permission_gate, event_bus)
@@ -223,13 +241,25 @@ class NexusCore:
         for tool in file_tools + system_tools + app_tools:
             tool_registry.register(tool)
 
-        # 4. Models Layer
-        model_router = ModelRouter()
+        # 4. Models Layer — strategy + tier config from config
+        tier_config = ModelTierConfig.from_dict(config.routing_tiers)
+        if config.routing_strategy == "rule_based":
+            strategy = RuleBasedStrategy(tier_config=tier_config)
+        else:
+            strategy = DefaultPassthroughStrategy()
+
+        model_router = ModelRouter(strategy=strategy, tier_config=tier_config)
         if use_dev_model:
             dev_backend = DevModelBackend()
             model_router.register_backend(dev_backend)
             model_router.set_route("*", dev_backend.name)
             logger.info("DevModelBackend registered (zero-LLM testing mode)")
+
+        logger.info(
+            "Model routing: strategy=%s, tiers=%s",
+            type(strategy).__name__,
+            config.routing_tiers,
+        )
 
         # 5. Context Manager
         context_manager = ContextManager()
@@ -238,14 +268,17 @@ class NexusCore:
         file_agent = FileAgent()
         file_agent.register_tools(file_tools)
         file_agent.set_llm(model_router)
+        file_agent.set_security_gate(permission_gate)
 
         system_agent = SystemAgent()
         system_agent.register_tools(system_tools)
         system_agent.set_llm(model_router)
+        system_agent.set_security_gate(permission_gate)
 
         app_agent = AppAgent()
         app_agent.register_tools(app_tools)
         app_agent.set_llm(model_router)
+        app_agent.set_security_gate(permission_gate)
 
         agent_registry = AgentRegistry()
         agent_registry.register(file_agent)
@@ -345,6 +378,17 @@ class NexusCore:
 
         return response
 
+    async def execute_voice(
+        self,
+        duration_seconds: float | None = None,
+        session_id: str = "voice_session",
+    ) -> VoiceCommandResult:
+        """Capture microphone input, transcribe it to plain text, and route through NEXUS."""
+        return await self.voice_service.process_voice_command(
+            duration_seconds=duration_seconds,
+            session_id=session_id,
+        )
+
     # ── Introspection & Diagnostics ──────────────────────────────────────
 
     def get_system_status(self) -> dict[str, Any]:
@@ -358,6 +402,7 @@ class NexusCore:
             "agents_registered": len(self.agent_registry),
             "tools_registered": len(self.tool_registry.list_tools()),
             "routing_strategy": type(self.supervisor.routing_strategy).__name__,
+            "voice_enabled": self.voice_service.is_enabled,
         }
 
     def get_agents(self) -> list[dict[str, Any]]:

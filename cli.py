@@ -167,6 +167,7 @@ def print_help() -> None:
     tools                            List registered tools
     format [box|json]                Toggle output formatting style
     history                          Show conversation history for current session
+    voice / listen                   Capture microphone input and execute command
     clear                            Clear terminal screen
     exit / quit / q                  Exit the CLI
 """
@@ -254,6 +255,19 @@ async def run_interactive(core: NexusCore, session_id: str = "cli_session") -> N
             print()
             continue
 
+        if cmd_lower in ["voice", "listen"]:
+            if not core.voice_service.is_enabled:
+                core.voice_service.enable()
+            print(f"{c.YELLOW}🎤 Listening for voice input...{c.RESET}")
+            voice_res = await core.execute_voice(session_id=session_id)
+            if voice_res.success:
+                print(f"{c.GREEN}Transcribed:{c.RESET} \"{voice_res.text}\"")
+                if voice_res.supervisor_result:
+                    print(format_structured_response(voice_res.supervisor_result))
+            else:
+                print(f"{c.RED}Voice Error:{c.RESET} {voice_res.error}")
+            continue
+
         # Route through: CLI → NEXUS Core → Supervisor → Agent → Tool
         try:
             response = await core.execute(user_input, session_id=session_id)
@@ -290,6 +304,39 @@ async def run_single_command(
         return 1
 
 
+async def run_single_voice_command(
+    core: NexusCore,
+    output_json: bool = False,
+    session_id: str = "cli_voice_run",
+) -> int:
+    """Capture a voice command, transcribe it, and execute it via Supervisor."""
+    c = Colors
+    if not core.voice_service.is_enabled:
+        core.voice_service.enable()
+
+    if not output_json:
+        print(f"{c.YELLOW}🎤 Listening for voice input...{c.RESET}")
+
+    voice_res = await core.execute_voice(session_id=session_id)
+    if not voice_res.success:
+        if output_json:
+            print(json.dumps({"status": "error", "error": voice_res.error}, indent=2))
+        else:
+            print(f"{c.RED}Voice Error:{c.RESET} {voice_res.error}")
+        return 1
+
+    if not output_json:
+        print(f"{c.GREEN}Transcribed:{c.RESET} \"{voice_res.text}\"")
+
+    if voice_res.supervisor_result:
+        if output_json:
+            print(json.dumps(voice_res.supervisor_result.to_dict(), indent=2))
+        else:
+            print(format_structured_response(voice_res.supervisor_result))
+        return 0 if voice_res.supervisor_result.success else 1
+    return 0
+
+
 # ── Entry Point ──────────────────────────────────────────────────────────────
 
 def main() -> None:
@@ -303,6 +350,11 @@ def main() -> None:
         nargs="?",
         default=None,
         help="Command text to execute. If omitted, starts interactive REPL.",
+    )
+    parser.add_argument(
+        "--voice",
+        action="store_true",
+        help="Capture microphone input, transcribe it, and execute the command.",
     )
     parser.add_argument(
         "--json",
@@ -335,7 +387,16 @@ def main() -> None:
         log_level=log_level,
     )
 
-    if args.command:
+    if args.voice:
+        exit_code = asyncio.run(
+            run_single_voice_command(
+                core,
+                output_json=args.output_json,
+                session_id=args.session_id,
+            )
+        )
+        sys.exit(exit_code)
+    elif args.command:
         exit_code = asyncio.run(
             run_single_command(
                 core,
