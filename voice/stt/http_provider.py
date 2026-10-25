@@ -5,7 +5,10 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-import httpx
+try:
+    import httpx
+except ImportError:
+    httpx = None  # type: ignore
 
 from voice.exceptions import EmptyAudioError, TranscriptionError
 from voice.stt.base import STTProvider

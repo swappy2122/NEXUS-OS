@@ -2,6 +2,7 @@ using System;
 using UnityEngine;
 using Nexus.VR.Areas;
 using Nexus.VR.UI;
+using Nexus.VR.WindowManager;
 
 namespace Nexus.VR.Core
 {
@@ -23,6 +24,9 @@ namespace Nexus.VR.Core
         [SerializeField] private WorkspaceArea workspaceArea;
         [SerializeField] private AIInteractionArea aiInteractionArea;
 
+        [Header("Window Manager")]
+        [SerializeField] private VRWindowManager windowManager;
+
         [Header("System HUD")]
         [SerializeField] private SpatialHUD systemHud;
 
@@ -33,6 +37,7 @@ namespace Nexus.VR.Core
         public ApplicationArea ApplicationArea => applicationArea;
         public WorkspaceArea WorkspaceArea => workspaceArea;
         public AIInteractionArea AIInteractionArea => aiInteractionArea;
+        public VRWindowManager WindowManager => windowManager;
         public SpatialHUD SystemHud => systemHud;
         public VRCameraController CameraController => cameraController;
 
@@ -84,6 +89,33 @@ namespace Nexus.VR.Core
                 {
                     systemHud.SetStatus($"AI {state.ToString().ToUpper()}");
                 };
+            }
+
+            // Wire window manager events to workspace area
+            if (windowManager != null)
+            {
+                windowManager.OnWindowCreated += (windowId) =>
+                {
+                    if (workspaceArea != null) workspaceArea.AddWindow();
+                    Debug.Log($"[NEXUS VR] Window created: {windowId}");
+                };
+
+                windowManager.OnWindowClosed += (windowId) =>
+                {
+                    if (workspaceArea != null) workspaceArea.RemoveWindow();
+                    Debug.Log($"[NEXUS VR] Window closed: {windowId}");
+                };
+
+                windowManager.OnWindowFocused += (windowId) =>
+                {
+                    if (systemHud != null)
+                    {
+                        var win = windowManager.GetWindow(windowId);
+                        if (win != null) systemHud.SetStatus($"Window: {win.Title}");
+                    }
+                };
+
+                Debug.Log($"[NEXUS VR] VRWindowManager initialized ({windowManager.WindowCount} windows)");
             }
 
             Debug.Log("[NEXUS VR] All spatial areas (Application, Workspace, AI Interaction) and HUD ready.");

@@ -98,8 +98,10 @@ DEFAULT_KEYWORDS: dict[str, list[str]] = {
     ],
     # ── Future agents (keywords ready, activate by registering the agent) ──
     "window_agent": [
-        "window", "minimize", "maximize", "resize", "arrange",
-        "tile", "snap", "focus window", "switch window",
+        "window", "windows", "minimize", "maximize", "resize", "arrange",
+        "tile", "snap", "focus window", "switch window", "create window",
+        "new window", "close window", "move window", "rotate window",
+        "select window", "focus", "vr window", "spatial window",
     ],
     "workspace_agent": [
         "workspace", "virtual desktop", "desktop", "switch workspace",

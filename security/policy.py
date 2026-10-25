@@ -162,6 +162,32 @@ _BASE_POLICIES: dict[str, Policy] = {
         max_risk_level=RiskLevel.MEDIUM,
         allow_shell=False,
     ),
+    "window": Policy(
+        agent_role="window",
+        allowed_scopes={
+            "window.create",
+            "window.close",
+            "window.move",
+            "window.resize",
+            "window.rotate",
+            "window.focus",
+            "window.list",
+            "window.snap",
+        },
+        allowed_tools={
+            "window_create",
+            "window_close",
+            "window_move",
+            "window_resize",
+            "window_rotate",
+            "window_focus",
+            "window_list",
+            "window_snap",
+        },
+        denied_paths=["/etc", "/boot", "/sys", "/proc", "/dev", "/root"],
+        max_risk_level=RiskLevel.MEDIUM,
+        allow_shell=False,
+    ),
 }
 
 # Provide transparent alias mapping for canonical agent names like 'file_agent'

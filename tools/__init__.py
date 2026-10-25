@@ -43,6 +43,17 @@ from tools.system_tools import (
     get_os_info,
     get_running_processes_summary,
 )
+from tools.window_tools import (
+    WindowCloseTool,
+    WindowCreateTool,
+    WindowFocusTool,
+    WindowListTool,
+    WindowMoveTool,
+    WindowResizeTool,
+    WindowRotateTool,
+    WindowSnapLayoutTool,
+    create_window_tools,
+)
 
 __all__ = [
     "BaseTool",
@@ -81,4 +92,13 @@ __all__ = [
     "get_disk_info",
     "get_os_info",
     "get_running_processes_summary",
+    "WindowCreateTool",
+    "WindowCloseTool",
+    "WindowMoveTool",
+    "WindowResizeTool",
+    "WindowRotateTool",
+    "WindowFocusTool",
+    "WindowListTool",
+    "WindowSnapLayoutTool",
+    "create_window_tools",
 ]
