@@ -432,6 +432,32 @@ class PermissionGate:
             sanitized_arguments=args,
         )
 
+    def check_protocol_action(
+        self,
+        agent_role: str,
+        action_name: str,
+        arguments: dict[str, Any] | None = None,
+        required_scopes: list[str] | None = None,
+    ) -> SecurityCheckResult:
+        """Authorize a non-tool protocol action at its dispatch boundary.
+
+        Protocol actions use the same policy, classification, and audit
+        machinery as tools. Unknown actions are denied by default.
+        """
+        args = arguments or {}
+        if not args.get("session_id"):
+            raise PermissionDenied(
+                agent_role,
+                "Validated session identity is required for protocol actions",
+                tool_name=action_name,
+            )
+        return self.check_tool_sync(
+            agent_role=agent_role,
+            tool_name=action_name,
+            arguments=args,
+            required_scopes=required_scopes,
+        )
+
     # -- Path and Command Security Verification ----------------------------
 
     def _verify_path_safety(

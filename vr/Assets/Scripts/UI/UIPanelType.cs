@@ -10,7 +10,6 @@ namespace Nexus.VR.UI
         Workspace,
         AIInteraction,
         Settings,
-        Window,
         Custom
     }
 

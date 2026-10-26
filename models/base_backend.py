@@ -9,7 +9,7 @@ provider.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import Any, AsyncIterator
 
 from core.types import ModelResponse
 
@@ -47,6 +47,15 @@ class BaseModelBackend(ABC):
     async def is_available(self) -> bool:
         """Return ``True`` if the backend is reachable and ready."""
         ...
+
+    async def stream_chat(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        **kwargs: Any,
+    ) -> AsyncIterator[str]:
+        """Yield provider text deltas when the backend supports streaming."""
+        raise NotImplementedError(f"Backend '{self.name}' does not support streaming")
 
     def __repr__(self) -> str:
         return f"<{self.__class__.__name__} name={self.name!r} model={self.model_id!r}>"

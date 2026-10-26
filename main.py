@@ -53,6 +53,7 @@ from tools.system_tools import (
     SystemOsTool,
     SystemProcessesTool,
 )
+from vr.window_registry import WindowRegistry
 
 
 def bootstrap():
@@ -121,6 +122,7 @@ def bootstrap():
 
     # ── 5. Context ───────────────────────────────────────────────────────
     context = ContextManager()
+    window_registry = WindowRegistry()
 
     # ── 6. Agents ────────────────────────────────────────────────────────
     #   a) Create agents
@@ -163,6 +165,9 @@ def bootstrap():
         tool_registry=tool_registry,
         model_router=model_router,
         config=config,
+        event_bus=event_bus,
+        window_registry=window_registry,
+        permission_gate=permission_gate,
     )
 
     logger.info(

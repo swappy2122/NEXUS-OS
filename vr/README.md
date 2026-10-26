@@ -60,6 +60,15 @@ The NEXUS VR shell provides an ambient, distraction-free spatial computing envir
      - Action buttons: "Push to Talk (Voice Input)" and "Clear History".
      - Ready for future integration with the NEXUS core and voice input module.
 
+
+6. **VR Window Manager**
+   - Full spatial window lifecycle: create, close, move, resize, rotate, focus.
+   - `WindowAgent` (Python) owns logical state; Unity renders via `VRWindowHandle`.
+   - JSON-over-WebSocket IPC bridge (`VRBridge` ↔ `VRBridgeClient`, port 9100).
+   - `WindowRegistry` maintains focus stack and z-ordering.
+   - Spatial layout engines: `CurvedArc`, `FlatGrid`, `FreeFloating`.
+   - User-initiated grab moves in VR reconcile back to Python state automatically.
+
 ---
 
 ## Directory Structure
@@ -86,6 +95,11 @@ vr/
 │       │   ├── SpatialButton.cs         # Gaze & pointer interactive button
 │       │   ├── SpatialHUD.cs            # Status bar (Clock, Workspace, Status)
 │       │   └── UIPanelType.cs           # Types and facing modes
+│       ├── Window/
+│       │   ├── WindowData.cs            # Serializable structs (wire protocol)
+│       │   ├── VRWindowHandle.cs        # Per-window MonoBehaviour (extends SpatialUIPanel)
+│       │   ├── VRWindowManager.cs       # Central window coordinator
+│       │   └── VRBridgeClient.cs        # WebSocket client to Python bridge
 │       ├── Areas/
 │       │   ├── NexusArea.cs             # Base spatial zone
 │       │   ├── ApplicationArea.cs       # App launcher & running docks
@@ -96,6 +110,10 @@ vr/
 │       │   └── LaserPointer.cs          # Controller laser beam pointer
 │       └── Editor/
 │           └── NexusVRSceneBuilder.cs   # Automated scene construction script
+├── window_types.py                      # VRWindow, Vec3, Quat, enums
+├── window_protocol.py                   # WindowCommand, WindowEvent, payloads
+├── window_registry.py                   # In-memory window state store
+├── vr_bridge.py                         # WebSocket server (Python ↔ Unity)
 ├── __init__.py                          # Python bridge for NEXUS OS
 └── README.md
 ```

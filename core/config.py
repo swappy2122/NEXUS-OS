@@ -25,6 +25,9 @@ class Config:
     enable_security: bool = field(
         default_factory=lambda: os.getenv("NEXUS_ENABLE_SECURITY", "true").lower() == "true"
     )
+    session_lifetime_seconds: int = field(
+        default_factory=lambda: int(os.getenv("NEXUS_SESSION_LIFETIME_SECONDS", "3600"))
+    )
     default_model: str = field(
         default_factory=lambda: os.getenv("NEXUS_DEFAULT_MODEL", "llama3.2")
     )
@@ -65,6 +68,7 @@ class Config:
             log_level=os.getenv("NEXUS_LOG_LEVEL", nexus_data.get("log_level", DEFAULT_LOG_LEVEL)),
             data_dir=Path(os.getenv("NEXUS_DATA_DIR", nexus_data.get("data_dir", DEFAULT_DATA_DIR))),
             enable_security=os.getenv("NEXUS_ENABLE_SECURITY", str(nexus_data.get("enable_security", True))).lower() == "true",
+            session_lifetime_seconds=int(os.getenv("NEXUS_SESSION_LIFETIME_SECONDS", nexus_data.get("session_lifetime_seconds", 3600))),
             default_model=os.getenv("NEXUS_DEFAULT_MODEL", nexus_data.get("default_model", "llama3.2")),
             ollama_base_url=os.getenv("NEXUS_OLLAMA_BASE_URL", nexus_data.get("ollama_base_url", "http://localhost:11434")),
             routing_strategy=os.getenv("NEXUS_ROUTING_STRATEGY", routing_data.get("strategy", "rule_based")),

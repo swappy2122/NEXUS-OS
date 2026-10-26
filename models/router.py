@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any
+from typing import Any, AsyncIterator
 
 from core.types import ModelResponse
 from models.base_backend import BaseModelBackend
@@ -235,6 +235,24 @@ class ModelRouter:
             decision.tier.value,
         )
         return await backend.chat(messages, tools, **kwargs)
+
+    async def stream_chat(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        *,
+        agent_role: str = "*",
+        **kwargs: Any,
+    ) -> AsyncIterator[str]:
+        """Stream provider deltas using the same routing policy as ``chat``."""
+        decision = self._strategy.classify(messages, agent_role=agent_role, tools=tools, **kwargs)
+        if decision.tier == ComplexityTier.BYPASS and decision.bypass_response is not None:
+            if decision.bypass_response.content:
+                yield decision.bypass_response.content
+            return
+        backend = self._pick_backend(agent_role, decision)
+        async for delta in backend.stream_chat(messages, tools, **kwargs):
+            yield delta
 
     def _pick_backend(
         self,

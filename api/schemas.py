@@ -72,3 +72,31 @@ class ContextSnapshotResponse(BaseModel):
     session_id: str
     conversation_length: int = 0
     system_state: dict[str, Any] = Field(default_factory=dict)
+
+
+# -- VR state -------------------------------------------------------------
+
+class VRStateResponse(BaseModel):
+    """Current authoritative Python-side VR window state."""
+
+    protocol_version: str
+    windows: list[dict[str, Any]] = Field(default_factory=list)
+    focused_window_id: str | None = None
+    window_count: int = 0
+
+
+class WorkspaceSnapshot(BaseModel):
+    """One workspace and the VR windows assigned to it."""
+
+    index: int
+    name: str
+    is_active: bool
+    windows: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class VRWorkspaceResponse(BaseModel):
+    """Workspace metadata combined with authoritative VR windows."""
+
+    protocol_version: str
+    active_workspace_index: int | None = None
+    workspaces: list[WorkspaceSnapshot] = Field(default_factory=list)

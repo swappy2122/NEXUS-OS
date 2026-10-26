@@ -1,790 +1,738 @@
 """Window agent for NEXUS OS.
 
-Manages the lifecycle of VR windows: creating, closing, moving,
-resizing, rotating, focusing, and snapping windows to layouts.
+Manages the logical lifecycle of VR spatial windows: creation, destruction,
+spatial transformations (move, resize, rotate), focus management, and
+layout orchestration.
 
-Responsibilities:
-    1. Process natural-language or structured intents about windows.
-    2. Maintain authoritative window state in ``WindowStateStore``.
-    3. Emit ``WindowCommand`` messages toward Unity via ``VRBridgeClient``.
-    4. Handle ``WindowEvent`` callbacks from Unity to reconcile state.
+The WindowAgent owns the *logical* state via ``WindowRegistry``.  It
+publishes ``WindowCommand`` events through the ``EventBus`` which the
+``VRBridge`` serializes and forwards to Unity.  It does **not** render
+anything or touch Unity APIs directly.
 
-The WindowAgent is intentionally *separate* from the AppAgent:
-    - An application can exist without a window (headless process).
-    - A window can exist without an application (pinned note, clock).
-    - Their lifecycles are independent.
+Communication flow
+──────────────────
+  Supervisor ──→ WindowAgent.execute(ctx)
+                   ├── mutates WindowRegistry
+                   ├── publishes to EventBus ("window.command.*")
+                   └── VRBridge serializes → Unity
 """
 
 from __future__ import annotations
 
 import logging
+import math
 from typing import Any
 
 from agents.base import BaseAgent
 from agents.types import AgentContext, AgentResult, Capability
-from agents.vr_bridge import IVRBridge
-from agents.window_layout import IWindowLayoutEngine, WindowLayoutEngine
-from agents.window_state_store import IWindowStateStore, WindowStateStore
-from core.vr_types import (
-    Quaternion3D,
-    Vector3D,
+from core.event_bus import EventBus
+
+from vr.window_protocol import (
+    CreatePayload,
+    FocusPayload,
+    MovePayload,
+    ResizePayload,
+    RotatePayload,
+    SetStatePayload,
     WindowCommand,
     WindowCommandType,
-    WindowContentType,
     WindowEvent,
     WindowEventType,
-    WindowLayoutMode,
+    build_command,
+)
+from vr.window_registry import WindowRegistry
+from vr.window_types import (
+    Quat,
+    Vec3,
+    VRWindow,
+    WindowAnchor,
     WindowSize,
     WindowState,
+    WindowTransform,
 )
 
 logger = logging.getLogger("nexus.agent.window")
 
-# ---------------------------------------------------------------------------
-# Capability declarations
-# ---------------------------------------------------------------------------
+
+# ── Capability declarations ─────────────────────────────────────────────
 
 WINDOW_CAPABILITIES = [
-    Capability(name="window_create", description="Create a new VR window"),
-    Capability(name="window_close", description="Close / destroy a VR window"),
-    Capability(name="window_move", description="Move a window to a 3D position"),
-    Capability(name="window_resize", description="Resize a window"),
-    Capability(name="window_rotate", description="Rotate a window in 3D"),
-    Capability(name="window_focus", description="Focus / select a window"),
-    Capability(name="window_list", description="List all open windows"),
-    Capability(name="window_snap", description="Snap windows to a spatial layout"),
+    Capability(name="window_create", description="Create a new VR spatial window"),
+    Capability(name="window_close", description="Close/destroy a VR window"),
+    Capability(name="window_move", description="Reposition a window in 3D space"),
+    Capability(name="window_resize", description="Change a window's spatial dimensions"),
+    Capability(name="window_rotate", description="Rotate a window's orientation"),
+    Capability(name="window_focus", description="Bring a window to the foreground"),
+    Capability(name="window_list", description="List active VR windows"),
+    Capability(name="window_layout", description="Arrange windows in spatial layouts"),
 ]
 
+# ── Spatial constants ───────────────────────────────────────────────────
 
-# ---------------------------------------------------------------------------
-# Agent implementation (Deterministic, Non-AI)
-# ---------------------------------------------------------------------------
+# Default comfort-zone parameters (meters)
+_DEFAULT_RADIUS = 2.5        # distance from user
+_DEFAULT_HEIGHT = 1.5        # eye-level baseline
+_ARC_HALF_ANGLE = 45.0       # degrees, ±45° from center
+_GRID_COLUMNS = 3
+_GRID_PADDING = 0.1          # meters between panels
+
 
 class WindowAgent(BaseAgent):
-    """Specialized agent for VR window lifecycle management (Deterministic, Non-AI)."""
+    """Specialized agent for VR window lifecycle management.
+
+    Args:
+        registry:  The shared ``WindowRegistry`` instance.
+        event_bus: The NEXUS OS ``EventBus`` for publishing commands.
+    """
 
     def __init__(
         self,
-        state_store: IWindowStateStore | None = None,
-        bridge: IVRBridge | None = None,
-        layout_engine: IWindowLayoutEngine | None = None,
+        registry: WindowRegistry,
+        event_bus: EventBus,
     ) -> None:
         super().__init__(
             name="window_agent",
             description=(
-                "Manages VR windows: create, close, move, resize, rotate, "
-                "focus, and spatial layout snapping."
+                "Manages VR spatial windows: create, close, move, resize, "
+                "rotate, focus, and layout arrangement."
             ),
             capabilities=WINDOW_CAPABILITIES,
         )
-        self._store: IWindowStateStore = state_store or WindowStateStore()
-        self._bridge: IVRBridge | None = bridge
-        self._layout: IWindowLayoutEngine = layout_engine or WindowLayoutEngine()
+        self._registry = registry
+        self._event_bus = event_bus
 
-    @property
-    def store(self) -> IWindowStateStore:
-        """Return the window state store."""
-        return self._store
+        # Subscribe to Unity ack events for state reconciliation
+        self._subscribe_to_events()
 
-    @property
-    def bridge(self) -> IVRBridge | None:
-        """Return the attached VR bridge, if any."""
-        return self._bridge
+    # ── EventBus Subscriptions ──────────────────────────────────────────
 
-    @property
-    def layout_engine(self) -> IWindowLayoutEngine:
-        """Return the layout engine."""
-        return self._layout
+    def _subscribe_to_events(self) -> None:
+        """Listen for Unity acknowledgement events."""
+        self._event_bus.subscribe("window.event.created", self._on_window_created)
+        self._event_bus.subscribe("window.event.closed", self._on_window_closed)
+        self._event_bus.subscribe("window.event.moved", self._on_window_moved)
+        self._event_bus.subscribe("window.event.resized", self._on_window_resized)
+        self._event_bus.subscribe("window.event.rotated", self._on_window_rotated)
+        self._event_bus.subscribe("window.event.focused", self._on_window_focused)
+        self._event_bus.subscribe("window.event.state_changed", self._on_state_changed)
 
-    # ── bridge wiring ────────────────────────────────────────────────────
+    # ── Event Handlers (Unity → Python reconciliation) ──────────────────
 
-    def set_bridge(self, bridge: IVRBridge) -> None:
-        """Inject the VR bridge and register our event handler."""
-        self._bridge = bridge
-        bridge.on_event(self._handle_vr_event)
-        logger.info("VR bridge attached to WindowAgent")
+    async def _on_window_created(self, data: dict[str, Any]) -> None:
+        """Handle Unity's ack that a window was successfully created."""
+        wid = data.get("window_id", "")
+        win = self._registry.get(wid)
+        if win and win.state == WindowState.CREATING:
+            win.state = WindowState.OPEN
+            logger.info("Window confirmed open: %s", wid)
 
-    # ── agent execution contract ─────────────────────────────────────────
+    async def _on_window_closed(self, data: dict[str, Any]) -> None:
+        """Handle Unity's ack that a window was destroyed."""
+        wid = data.get("window_id", "")
+        win = self._registry.get(wid)
+        if win:
+            win.state = WindowState.CLOSED
+            self._registry.remove(wid)
+            logger.info("Window confirmed closed: %s", wid)
 
-    async def execute(self, ctx: AgentContext) -> AgentResult:
-        """Process a window management task deterministically without AI.
-
-        Execution paths:
-        1. **Direct action**: ``ctx.parameters`` contains an ``action``.
-        2. **Tool execution**: ``ctx.parameters`` contains a ``tool_name``.
-        3. **Rule-based intent parsing**: Deterministically extracts action
-           from natural language intent without an LLM.
-        """
-        # 1. Direct action path
-        action = ctx.parameters.get("action")
-        if action:
-            return await self._direct_execute(action, ctx.parameters)
-
-        # 2. Tool name execution path
-        tool_name = ctx.parameters.get("tool_name")
-        if tool_name:
-            args = ctx.parameters.get("arguments", {})
-            if tool_name in self._tools:
-                tool_res = await self.use_tool(tool_name, **args)
-                return AgentResult(
-                    success=tool_res.success,
-                    output=str(tool_res.output) if tool_res.success else "",
-                    error=tool_res.error,
-                    data={"tool_name": tool_name},
-                )
-            if tool_name.startswith("window_"):
-                action_name = tool_name[len("window_"):]
-                return await self._direct_execute(action_name, args)
-
-        # 3. Deterministic rule-based intent parsing (No AI)
-        action, params = self._parse_intent_deterministically(ctx.intent)
-        if action:
-            # Merge any explicit parameters with parsed parameters
-            merged_params = {**params, **ctx.parameters}
-            return await self._direct_execute(action, merged_params)
-
-        return AgentResult(
-            success=False,
-            error=f"Could not parse window action from intent: '{ctx.intent}'",
-        )
-
-    def _parse_intent_deterministically(self, intent: str) -> tuple[str | None, dict[str, Any]]:
-        """Extract window action and parameters using deterministic rules."""
-        lower = intent.lower().strip()
-
-        # List windows
-        if any(kw in lower for kw in ["list window", "list open", "show window", "get window", "all window"]):
-            return "list", {}
-
-        # Close window
-        if any(kw in lower for kw in ["close window", "destroy window", "remove window", "kill window", "close "]):
-            # Try to extract title/name after 'close' or 'window'
-            words = lower.split()
-            target = None
-            if "window" in words:
-                idx = words.index("window")
-                if idx + 1 < len(words):
-                    target = " ".join(words[idx + 1:])
-            elif words and words[0] == "close" and len(words) > 1:
-                target = " ".join(words[1:])
-            params = {"title": target} if target else {}
-            return "close", params
-
-        # Create window
-        if any(kw in lower for kw in ["create window", "new window", "open window", "add window", "make window"]):
-            words = lower.split()
-            target = "New Window"
-            if "window" in words:
-                idx = words.index("window")
-                if idx + 1 < len(words):
-                    target = " ".join(words[idx + 1:]).strip("'\"")
-            return "create", {"title": target}
-
-        # Focus / select window
-        if any(kw in lower for kw in ["focus window", "select window", "focus", "select"]):
-            words = lower.split()
-            target = None
-            if "window" in words:
-                idx = words.index("window")
-                if idx + 1 < len(words):
-                    target = " ".join(words[idx + 1:])
-            elif words and words[0] in ("focus", "select") and len(words) > 1:
-                target = " ".join(words[1:])
-            params = {"title": target} if target else {}
-            return "focus", params
-
-        # Snap / layout
-        if any(kw in lower for kw in ["snap", "tile", "arrange", "layout"]):
-            layout = "curved_arc"
-            if "grid" in lower:
-                layout = "flat_grid"
-            elif "float" in lower:
-                layout = "free_floating"
-            return "snap", {"layout": layout}
-
-        # Move window
-        if "move" in lower:
-            return "move", {}
-
-        # Resize window
-        if "resize" in lower:
-            return "resize", {}
-
-        # Rotate window
-        if "rotate" in lower or "turn" in lower:
-            return "rotate", {}
-
-        return None, {}
-
-    # ── direct action dispatch ───────────────────────────────────────────
-
-    async def _direct_execute(
-        self, action: str, params: dict[str, Any],
-    ) -> AgentResult:
-        """Route a structured action to the appropriate handler."""
-        handlers = {
-            "create": self._action_create,
-            "close": self._action_close,
-            "move": self._action_move,
-            "resize": self._action_resize,
-            "rotate": self._action_rotate,
-            "focus": self._action_focus,
-            "list": self._action_list,
-            "snap": self._action_snap,
-        }
-
-        handler = handlers.get(action)
-        if handler is None:
-            return AgentResult(
-                success=False,
-                error=f"Unknown window action: '{action}'",
+    async def _on_window_moved(self, data: dict[str, Any]) -> None:
+        """Reconcile position when user grabs a window in VR."""
+        wid = data.get("window_id", "")
+        win = self._registry.get(wid)
+        if win:
+            payload = data.get("payload", {})
+            pos = payload.get("position", {})
+            win.transform.position = Vec3(
+                x=pos.get("x", win.transform.position.x),
+                y=pos.get("y", win.transform.position.y),
+                z=pos.get("z", win.transform.position.z),
             )
 
-        try:
-            return await handler(params)
-        except Exception as exc:
-            logger.exception("Window action '%s' failed", action)
-            return AgentResult(success=False, error=str(exc))
+    async def _on_window_resized(self, data: dict[str, Any]) -> None:
+        """Reconcile size after a resize event."""
+        wid = data.get("window_id", "")
+        win = self._registry.get(wid)
+        if win:
+            payload = data.get("payload", {})
+            size = payload.get("size", {})
+            win.size.width = size.get("width", win.size.width)
+            win.size.height = size.get("height", win.size.height)
 
-    # ── action handlers ──────────────────────────────────────────────────
-
-    async def _action_create(self, params: dict[str, Any]) -> AgentResult:
-        """Create a new VR window."""
-        state = WindowState(
-            title=params.get("title", "New Window"),
-            app_id=params.get("app_id"),
-            workspace_id=params.get("workspace_id", "workspace_1"),
-            position=Vector3D(**params["position"]) if "position" in params else Vector3D(x=0.0, y=1.5, z=2.5),
-            rotation=Quaternion3D(**params["rotation"]) if "rotation" in params else Quaternion3D.identity(),
-            size=WindowSize(**params["size"]) if "size" in params else WindowSize(),
-            content_type=WindowContentType(params.get("content_type", "custom")),
-            metadata=params.get("metadata", {}),
-        )
-
-        created = self._store.create(state)
-        self._store.set_focus(created.window_id)
-
-        # Send CREATE command to Unity
-        await self._send_command(WindowCommand(
-            command_type=WindowCommandType.CREATE,
-            window_id=created.window_id,
-            payload=created.model_dump(mode="json"),
-        ))
-
-        return AgentResult(
-            output=f"Created window '{created.title}' (id={created.window_id})",
-            data={"window_id": created.window_id, "action": "create"},
-        )
-
-    async def _action_close(self, params: dict[str, Any]) -> AgentResult:
-        """Close an existing VR window."""
-        window_id = self._resolve_window_id(params)
-        if window_id is None:
-            return AgentResult(success=False, error="Could not resolve window to close")
-
-        window = self._store.get(window_id)
-        if window is None:
-            return AgentResult(success=False, error=f"Window '{window_id}' not found")
-
-        await self._send_command(WindowCommand(
-            command_type=WindowCommandType.CLOSE,
-            window_id=window_id,
-        ))
-
-        title = window.title
-        self._store.remove(window_id)
-
-        return AgentResult(
-            output=f"Closed window '{title}' (id={window_id})",
-            data={"window_id": window_id, "action": "close"},
-        )
-
-    async def _action_move(self, params: dict[str, Any]) -> AgentResult:
-        """Move a window to a new position."""
-        window_id = self._resolve_window_id(params)
-        if window_id is None:
-            return AgentResult(success=False, error="Could not resolve window to move")
-
-        position = Vector3D(**params["position"]) if "position" in params else None
-        if position is None:
-            return AgentResult(success=False, error="No position specified for move")
-
-        self._store.update(window_id, position=position)
-
-        await self._send_command(WindowCommand(
-            command_type=WindowCommandType.MOVE,
-            window_id=window_id,
-            payload={
-                "position": position.model_dump(),
-                "animate": params.get("animate", True),
-            },
-        ))
-
-        return AgentResult(
-            output=f"Moved window '{window_id}' to {position}",
-            data={"window_id": window_id, "action": "move"},
-        )
-
-    async def _action_resize(self, params: dict[str, Any]) -> AgentResult:
-        """Resize a window."""
-        window_id = self._resolve_window_id(params)
-        if window_id is None:
-            return AgentResult(success=False, error="Could not resolve window to resize")
-
-        size = WindowSize(**params["size"]) if "size" in params else None
-        if size is None:
-            return AgentResult(success=False, error="No size specified for resize")
-
-        self._store.update(window_id, size=size)
-
-        await self._send_command(WindowCommand(
-            command_type=WindowCommandType.RESIZE,
-            window_id=window_id,
-            payload={
-                "size": size.model_dump(),
-                "anchor": params.get("anchor", "center"),
-            },
-        ))
-
-        return AgentResult(
-            output=f"Resized window '{window_id}' to {size}",
-            data={"window_id": window_id, "action": "resize"},
-        )
-
-    async def _action_rotate(self, params: dict[str, Any]) -> AgentResult:
-        """Rotate a window."""
-        window_id = self._resolve_window_id(params)
-        if window_id is None:
-            return AgentResult(success=False, error="Could not resolve window to rotate")
-
-        rotation = Quaternion3D(**params["rotation"]) if "rotation" in params else None
-        if rotation is None:
-            return AgentResult(success=False, error="No rotation specified")
-
-        self._store.update(window_id, rotation=rotation)
-
-        await self._send_command(WindowCommand(
-            command_type=WindowCommandType.ROTATE,
-            window_id=window_id,
-            payload={
-                "rotation": rotation.model_dump(),
-                "animate": params.get("animate", True),
-            },
-        ))
-
-        return AgentResult(
-            output=f"Rotated window '{window_id}'",
-            data={"window_id": window_id, "action": "rotate"},
-        )
-
-    async def _action_focus(self, params: dict[str, Any]) -> AgentResult:
-        """Focus / select a window."""
-        window_id = self._resolve_window_id(params)
-        if window_id is None:
-            return AgentResult(success=False, error="Could not resolve window to focus")
-
-        self._store.set_focus(window_id)
-
-        await self._send_command(WindowCommand(
-            command_type=WindowCommandType.FOCUS,
-            window_id=window_id,
-        ))
-
-        return AgentResult(
-            output=f"Focused window '{window_id}'",
-            data={"window_id": window_id, "action": "focus"},
-        )
-
-    async def _action_list(self, params: dict[str, Any]) -> AgentResult:
-        """List all open windows."""
-        workspace_id = params.get("workspace_id")
-
-        if workspace_id:
-            windows = self._store.get_by_workspace(workspace_id)
-        else:
-            windows = self._store.list_all()
-
-        if not windows:
-            return AgentResult(output="No windows open.")
-
-        lines = []
-        for w in windows:
-            focus_marker = " ★" if w.is_focused else ""
-            pin_marker = " 📌" if w.is_pinned else ""
-            lines.append(
-                f"  [{w.window_id}] {w.title} "
-                f"({w.content_type.value}){focus_marker}{pin_marker}"
+    async def _on_window_rotated(self, data: dict[str, Any]) -> None:
+        """Reconcile rotation after a user-initiated rotation."""
+        wid = data.get("window_id", "")
+        win = self._registry.get(wid)
+        if win:
+            payload = data.get("payload", {})
+            rot = payload.get("rotation", {})
+            win.transform.rotation = Quat(
+                x=rot.get("x", win.transform.rotation.x),
+                y=rot.get("y", win.transform.rotation.y),
+                z=rot.get("z", win.transform.rotation.z),
+                w=rot.get("w", win.transform.rotation.w),
             )
 
-        return AgentResult(
-            output=f"Open windows ({len(windows)}):\n" + "\n".join(lines),
-            data={"window_count": len(windows), "action": "list"},
-        )
+    async def _on_window_focused(self, data: dict[str, Any]) -> None:
+        """Handle Unity notifying us of a focus change (e.g. user clicked)."""
+        wid = data.get("window_id", "")
+        self._registry.set_focus(wid)
 
-    async def _action_snap(self, params: dict[str, Any]) -> AgentResult:
-        """Snap all windows in the current workspace to a layout."""
-        layout_str = params.get("layout", "curved_arc")
-        layout = WindowLayoutMode(layout_str)
-        workspace_id = params.get("workspace_id", "workspace_1")
-
-        windows = self._store.get_by_workspace(workspace_id)
-        if not windows:
-            return AgentResult(output="No windows to snap.")
-
-        user_pos = Vector3D(**params["user_position"]) if "user_position" in params else Vector3D.zero()
-        user_fwd = Vector3D(**params["user_forward"]) if "user_forward" in params else Vector3D.forward()
-
-        positions = self._layout.compute_positions(windows, layout, user_pos, user_fwd)
-
-        # Issue MOVE commands for each window
-        for window_id, position in positions.items():
-            self._store.update(window_id, position=position)
-            await self._send_command(WindowCommand(
-                command_type=WindowCommandType.MOVE,
-                window_id=window_id,
-                payload={
-                    "position": position.model_dump(),
-                    "animate": True,
-                },
-            ))
-
-        return AgentResult(
-            output=f"Snapped {len(positions)} windows to {layout.value} layout",
-            data={"layout": layout.value, "window_count": len(positions), "action": "snap"},
-        )
-
-    # ── VR event handling ────────────────────────────────────────────────
-
-    async def _handle_vr_event(self, event: WindowEvent) -> None:
-        """Process incoming events from the Unity VR shell."""
-        handler_map = {
-            WindowEventType.POSITION_CHANGED: self._on_position_changed,
-            WindowEventType.ROTATION_CHANGED: self._on_rotation_changed,
-            WindowEventType.SIZE_CHANGED: self._on_size_changed,
-            WindowEventType.INTERACTION_FOCUS_REQUEST: self._on_focus_request,
-            WindowEventType.INTERACTION_CLOSE_REQUEST: self._on_close_request,
-            WindowEventType.WINDOW_CREATED_ACK: self._on_created_ack,
-            WindowEventType.WINDOW_CLOSED_ACK: self._on_closed_ack,
-        }
-
-        handler = handler_map.get(event.event_type)
-        if handler:
-            await handler(event)
-        else:
-            logger.debug(
-                "Unhandled VR event type: %s (window=%s)",
-                event.event_type.value, event.window_id,
-            )
-
-    async def _on_position_changed(self, event: WindowEvent) -> None:
-        """User physically moved a window in VR — reconcile state."""
-        pos_data = event.payload.get("position", {})
-        if pos_data:
-            position = Vector3D(**pos_data)
+    async def _on_state_changed(self, data: dict[str, Any]) -> None:
+        """Handle generic state change events from Unity."""
+        wid = data.get("window_id", "")
+        win = self._registry.get(wid)
+        if win:
+            payload = data.get("payload", {})
+            new_state = payload.get("state", "")
             try:
-                self._store.update(event.window_id, position=position)
-            except KeyError:
-                logger.warning("Position changed for unknown window '%s'", event.window_id)
+                win.state = WindowState(new_state)
+            except ValueError:
+                logger.warning("Unknown state from Unity: %s", new_state)
 
-    async def _on_rotation_changed(self, event: WindowEvent) -> None:
-        """User rotated a window in VR — reconcile state."""
-        rot_data = event.payload.get("rotation", {})
-        if rot_data:
-            rotation = Quaternion3D(**rot_data)
-            try:
-                self._store.update(event.window_id, rotation=rotation)
-            except KeyError:
-                logger.warning("Rotation changed for unknown window '%s'", event.window_id)
-
-    async def _on_size_changed(self, event: WindowEvent) -> None:
-        """User resized a window in VR — reconcile state."""
-        size_data = event.payload.get("size", {})
-        if size_data:
-            size = WindowSize(**size_data)
-            try:
-                self._store.update(event.window_id, size=size)
-            except KeyError:
-                logger.warning("Size changed for unknown window '%s'", event.window_id)
-
-    async def _on_focus_request(self, event: WindowEvent) -> None:
-        """User clicked / gazed at a window — set focus."""
-        try:
-            self._store.set_focus(event.window_id)
-        except KeyError:
-            logger.warning("Focus request for unknown window '%s'", event.window_id)
-
-    async def _on_close_request(self, event: WindowEvent) -> None:
-        """User closed a window via VR interaction — remove from store."""
-        self._store.remove(event.window_id)
-
-    async def _on_created_ack(self, event: WindowEvent) -> None:
-        """Unity confirmed window creation."""
-        logger.info("Unity acknowledged creation of window '%s'", event.window_id)
-
-    async def _on_closed_ack(self, event: WindowEvent) -> None:
-        """Unity confirmed window destruction."""
-        self._store.remove(event.window_id)
-        logger.info("Unity acknowledged closure of window '%s'", event.window_id)
-
-    # ── helpers ──────────────────────────────────────────────────────────
-
-    def _resolve_window_id(self, params: dict[str, Any]) -> str | None:
-        """Resolve a window from params — by ID, title, or app_id."""
-        # Direct ID
-        window_id = params.get("window_id")
-        if window_id and self._store.get(window_id):
-            return window_id
-
-        # By title (fuzzy match)
-        title = params.get("title")
-        if title:
-            for w in self._store.list_all():
-                if title.lower() in w.title.lower():
-                    return w.window_id
-
-        # By app_id
-        app_id = params.get("app_id")
-        if app_id:
-            windows = self._store.get_by_app(app_id)
-            if windows:
-                return windows[0].window_id
-
-        # Fallback: currently focused window
-        focused = self._store.get_focused()
-        if focused:
-            return focused.window_id
-
-        return None
-
-    async def _send_command(self, command: WindowCommand) -> None:
-        """Send a command to Unity via the bridge, if connected."""
-        if self._bridge is None:
-            logger.debug(
-                "No VR bridge — command %s for window '%s' not sent",
-                command.command_type.value, command.window_id,
-            )
-            return
-
-        await self._bridge.send_command(command)
-
-    # ── introspection ────────────────────────────────────────────────────
-
-    def get_store_snapshot(self) -> dict[str, Any]:
-        """Return a diagnostic snapshot of the window state store."""
-        return self._store.describe()
-
-    # ── programmatic API (Deterministic, Non-AI) ─────────────────────────
+    # ── Direct API ──────────────────────────────────────────────────────
 
     async def create_window(
         self,
-        title: str = "New Window",
-        app_id: str | None = None,
-        workspace_id: str = "workspace_1",
-        position: Vector3D | dict[str, float] | None = None,
-        rotation: Quaternion3D | dict[str, float] | None = None,
-        size: WindowSize | dict[str, float] | None = None,
-        content_type: WindowContentType | str = WindowContentType.CUSTOM,
-        metadata: dict[str, Any] | None = None,
-    ) -> WindowState:
-        """Programmatically create a new VR window and notify Unity."""
-        if isinstance(position, dict):
-            pos = Vector3D(**position)
-        elif position is None:
-            pos = Vector3D(x=0.0, y=1.5, z=2.5)
-        else:
-            pos = position
+        title: str,
+        app_id: str = "",
+        workspace_index: int = 0,
+        position: Vec3 | None = None,
+        size: WindowSize | None = None,
+        anchor: WindowAnchor = WindowAnchor.WORLD_FIXED,
+    ) -> VRWindow:
+        """Create a new VR window and publish the command to Unity.
 
-        if isinstance(rotation, dict):
-            rot = Quaternion3D(**rotation)
-        elif rotation is None:
-            rot = Quaternion3D.identity()
-        else:
-            rot = rotation
+        If *position* is ``None``, an optimal spawn position is computed
+        automatically based on existing windows in the workspace.
 
-        if isinstance(size, dict):
-            sz = WindowSize(**size)
-        elif size is None:
-            sz = WindowSize()
-        else:
-            sz = size
+        Returns:
+            The newly created ``VRWindow`` record (state=CREATING until ack'd).
+        """
+        # Auto-place if no position given
+        if position is None:
+            existing = self._registry.get_by_workspace(workspace_index)
+            position = self._compute_spawn_position(existing)
 
-        if isinstance(content_type, str):
-            c_type = WindowContentType(content_type)
-        else:
-            c_type = content_type
-
-        state = WindowState(
+        window = VRWindow(
             title=title,
             app_id=app_id,
-            workspace_id=workspace_id,
-            position=pos,
-            rotation=rot,
-            size=sz,
-            content_type=c_type,
-            metadata=metadata or {},
+            workspace_index=workspace_index,
+            state=WindowState.CREATING,
+            anchor=anchor,
+            transform=WindowTransform(position=position),
+            size=size or WindowSize(),
         )
-        created = self._store.create(state)
-        self._store.set_focus(created.window_id)
 
-        await self._send_command(WindowCommand(
-            command_type=WindowCommandType.CREATE,
-            window_id=created.window_id,
-            payload=created.model_dump(mode="json"),
-        ))
-        return created
+        self._registry.add(window)
+        self._registry.set_focus(window.window_id)
 
-    async def close_window(
-        self,
-        window_id: str | None = None,
-        title: str | None = None,
-        app_id: str | None = None,
-    ) -> bool:
-        """Programmatically close an existing VR window."""
-        target_id = self._resolve_window_id({
-            "window_id": window_id,
-            "title": title,
-            "app_id": app_id,
-        })
-        if not target_id or not self._store.get(target_id):
+        # Build and publish create command
+        payload = CreatePayload(
+            title=title,
+            app_id=app_id,
+            workspace_index=workspace_index,
+            transform=window.transform,
+            size=window.size,
+            anchor=anchor,
+        )
+        cmd = build_command(WindowCommandType.CREATE, window.window_id, payload)
+        await self._publish_command(cmd)
+
+        logger.info("Created window: %s (%s) at pos=(%.1f, %.1f, %.1f)",
+                     window.window_id, title,
+                     position.x, position.y, position.z)
+        return window
+
+    async def close_window(self, window_id: str) -> bool:
+        """Request closure of a window.
+
+        Sets the state to CLOSING; actual removal happens when Unity ack's.
+
+        Returns:
+            ``True`` if the window was found and close was requested.
+        """
+        win = self._registry.get(window_id)
+        if win is None:
+            logger.warning("Cannot close unknown window: %s", window_id)
             return False
 
-        await self._send_command(WindowCommand(
-            command_type=WindowCommandType.CLOSE,
-            window_id=target_id,
-        ))
-        return self._store.remove(target_id)
+        win.state = WindowState.CLOSING
+        cmd = build_command(WindowCommandType.CLOSE, window_id)
+        await self._publish_command(cmd)
+
+        logger.info("Requested close: %s (%s)", window_id, win.title)
+        return True
 
     async def move_window(
         self,
-        position: Vector3D | dict[str, float],
-        window_id: str | None = None,
-        title: str | None = None,
+        window_id: str,
+        position: Vec3,
         animate: bool = True,
-    ) -> WindowState:
-        """Programmatically move a window to a new 3D position."""
-        target_id = self._resolve_window_id({
-            "window_id": window_id,
-            "title": title,
-        })
-        if not target_id:
-            raise ValueError(f"Could not resolve window to move (id={window_id}, title={title})")
+    ) -> bool:
+        """Move a window to a new 3D position.
 
-        pos = Vector3D(**position) if isinstance(position, dict) else position
-        updated = self._store.update(target_id, position=pos)
+        Returns:
+            ``True`` if the window was found and the command was published.
+        """
+        win = self._registry.get(window_id)
+        if win is None:
+            return False
 
-        await self._send_command(WindowCommand(
-            command_type=WindowCommandType.MOVE,
-            window_id=target_id,
-            payload={"position": pos.model_dump(), "animate": animate},
-        ))
-        return updated
+        win.transform.position = position
+        payload = MovePayload(target_position=position, animate=animate)
+        cmd = build_command(WindowCommandType.MOVE, window_id, payload)
+        await self._publish_command(cmd)
+        return True
 
     async def resize_window(
         self,
-        size: WindowSize | dict[str, float],
-        window_id: str | None = None,
-        title: str | None = None,
-        anchor: str = "center",
-    ) -> WindowState:
-        """Programmatically resize a window."""
-        target_id = self._resolve_window_id({
-            "window_id": window_id,
-            "title": title,
-        })
-        if not target_id:
-            raise ValueError(f"Could not resolve window to resize (id={window_id}, title={title})")
+        window_id: str,
+        size: WindowSize,
+        animate: bool = True,
+    ) -> bool:
+        """Resize a window's spatial dimensions.
 
-        sz = WindowSize(**size) if isinstance(size, dict) else size
-        updated = self._store.update(target_id, size=sz)
+        Returns:
+            ``True`` if the window was found and the command was published.
+        """
+        win = self._registry.get(window_id)
+        if win is None:
+            return False
 
-        await self._send_command(WindowCommand(
-            command_type=WindowCommandType.RESIZE,
-            window_id=target_id,
-            payload={"size": sz.model_dump(), "anchor": anchor},
-        ))
-        return updated
+        win.size = size
+        payload = ResizePayload(target_size=size, animate=animate)
+        cmd = build_command(WindowCommandType.RESIZE, window_id, payload)
+        await self._publish_command(cmd)
+        return True
 
     async def rotate_window(
         self,
-        rotation: Quaternion3D | dict[str, float],
-        window_id: str | None = None,
-        title: str | None = None,
+        window_id: str,
+        rotation: Quat,
         animate: bool = True,
-    ) -> WindowState:
-        """Programmatically rotate a window."""
-        target_id = self._resolve_window_id({
-            "window_id": window_id,
-            "title": title,
-        })
-        if not target_id:
-            raise ValueError(f"Could not resolve window to rotate (id={window_id}, title={title})")
+    ) -> bool:
+        """Rotate a window to a new orientation.
 
-        rot = Quaternion3D(**rotation) if isinstance(rotation, dict) else rotation
-        updated = self._store.update(target_id, rotation=rot)
+        Returns:
+            ``True`` if the window was found and the command was published.
+        """
+        win = self._registry.get(window_id)
+        if win is None:
+            return False
 
-        await self._send_command(WindowCommand(
-            command_type=WindowCommandType.ROTATE,
-            window_id=target_id,
-            payload={"rotation": rot.model_dump(), "animate": animate},
-        ))
-        return updated
+        win.transform.rotation = rotation
+        payload = RotatePayload(target_rotation=rotation, animate=animate)
+        cmd = build_command(WindowCommandType.ROTATE, window_id, payload)
+        await self._publish_command(cmd)
+        return True
 
-    async def focus_window(
+    async def focus_window(self, window_id: str) -> bool:
+        """Bring a window to the foreground.
+
+        Returns:
+            ``True`` if the window was found and focus was set.
+        """
+        win = self._registry.set_focus(window_id)
+        if win is None:
+            return False
+
+        payload = FocusPayload(focused=True)
+        cmd = build_command(WindowCommandType.FOCUS, window_id, payload)
+        await self._publish_command(cmd)
+        return True
+
+    async def set_window_state(
         self,
-        window_id: str | None = None,
-        title: str | None = None,
-    ) -> WindowState:
-        """Programmatically focus a window."""
-        target_id = self._resolve_window_id({
-            "window_id": window_id,
-            "title": title,
-        })
-        if not target_id:
-            raise ValueError(f"Could not resolve window to focus (id={window_id}, title={title})")
+        window_id: str,
+        state: WindowState,
+    ) -> bool:
+        """Set a window's lifecycle state (minimize, maximize, restore).
 
-        self._store.set_focus(target_id)
-        await self._send_command(WindowCommand(
-            command_type=WindowCommandType.FOCUS,
-            window_id=target_id,
-        ))
-        window = self._store.get(target_id)
-        if window is None:
-            raise KeyError(f"Window '{target_id}' not found after focus")
-        return window
+        Returns:
+            ``True`` if the window was found and the command was published.
+        """
+        win = self._registry.get(window_id)
+        if win is None:
+            return False
 
-    def list_windows(self, workspace_id: str | None = None) -> list[WindowState]:
-        """Return all open windows (optionally filtered by workspace)."""
-        if workspace_id:
-            return self._store.get_by_workspace(workspace_id)
-        return self._store.list_all()
+        win.state = state
+        payload = SetStatePayload(target_state=state)
+        cmd = build_command(WindowCommandType.SET_STATE, window_id, payload)
+        await self._publish_command(cmd)
+        return True
 
-    def get_window(self, window_id: str) -> WindowState | None:
-        """Get a single window by ID."""
-        return self._store.get(window_id)
-
-    async def snap_to_layout(
+    async def list_windows(
         self,
-        layout: WindowLayoutMode | str = WindowLayoutMode.CURVED_ARC,
-        workspace_id: str = "workspace_1",
-        user_position: Vector3D | None = None,
-        user_forward: Vector3D | None = None,
-    ) -> dict[str, Vector3D]:
-        """Snap all windows in a workspace to a spatial layout."""
-        mode = WindowLayoutMode(layout) if isinstance(layout, str) else layout
-        windows = self._store.get_by_workspace(workspace_id)
-        if not windows:
-            return {}
+        workspace_index: int | None = None,
+    ) -> list[VRWindow]:
+        """Return active windows, optionally filtered by workspace."""
+        if workspace_index is not None:
+            return self._registry.get_by_workspace(workspace_index)
+        return self._registry.get_all()
 
-        u_pos = user_position or Vector3D.zero()
-        u_fwd = user_forward or Vector3D.forward()
-        positions = self._layout.compute_positions(windows, mode, u_pos, u_fwd)
+    async def arrange_layout(
+        self,
+        workspace_index: int,
+        mode: str = "curved_arc",
+    ) -> int:
+        """Rearrange all windows in a workspace into a spatial layout.
 
-        for w_id, pos in positions.items():
-            self._store.update(w_id, position=pos)
-            await self._send_command(WindowCommand(
-                command_type=WindowCommandType.MOVE,
-                window_id=w_id,
-                payload={"position": pos.model_dump(), "animate": True},
-            ))
+        Args:
+            workspace_index: Target workspace.
+            mode: One of "curved_arc", "flat_grid", "free_floating".
 
-        return positions
+        Returns:
+            Number of windows rearranged.
+        """
+        windows = self._registry.get_by_workspace(workspace_index)
+        open_windows = [
+            w for w in windows
+            if w.state in (WindowState.OPEN, WindowState.MAXIMIZED)
+        ]
+
+        if not open_windows:
+            return 0
+
+        if mode == "curved_arc":
+            positions = self._layout_curved_arc(open_windows)
+        elif mode == "flat_grid":
+            positions = self._layout_flat_grid(open_windows)
+        else:
+            # free_floating — leave positions as-is
+            return 0
+
+        for win, (pos, rot) in zip(open_windows, positions):
+            await self.move_window(win.window_id, pos, animate=True)
+            await self.rotate_window(win.window_id, rot, animate=True)
+
+        return len(open_windows)
+
+    # ── Agent Execution Contract ────────────────────────────────────────
+
+    async def execute(self, ctx: AgentContext) -> AgentResult:
+        """Process a window management task.
+
+        Supports two modes:
+        1. **Direct execution**: If ``ctx.parameters`` contains a
+           ``tool_name``, the corresponding tool is executed immediately.
+        2. **Intent-based dispatch**: Keyword matching for create, close,
+           move, resize, rotate, focus, list, and layout actions.
+        """
+        # Direct execution path
+        tool_name = ctx.parameters.get("tool_name")
+        if tool_name:
+            return await self._execute_direct(tool_name, ctx.parameters.get("arguments", {}))
+
+        # Intent-based dispatch (common patterns)
+        intent = ctx.intent.lower().strip()
+        params = ctx.parameters
+
+        if any(kw in intent for kw in ("create", "open", "new window", "spawn")):
+            pos = params.get("position")
+            pos_vec = Vec3(**pos) if isinstance(pos, dict) else pos
+            sz = params.get("size")
+            sz_obj = WindowSize(**sz) if isinstance(sz, dict) else sz
+            anchor = params.get("anchor", WindowAnchor.WORLD_FIXED)
+            if isinstance(anchor, str):
+                anchor = WindowAnchor(anchor)
+            win = await self.create_window(
+                title=params.get("title", "Untitled"),
+                app_id=params.get("app_id", ""),
+                workspace_index=params.get("workspace_index", 0),
+                position=pos_vec,
+                size=sz_obj,
+                anchor=anchor,
+            )
+            return AgentResult(
+                output=f"Created window '{win.title}' ({win.window_id})",
+                data={"window_id": win.window_id, "title": win.title},
+            )
+
+        if any(kw in intent for kw in ("close", "destroy", "kill window")):
+            wid = params.get("window_id", "")
+            if not wid:
+                return AgentResult(success=False, error="No window_id specified for close")
+            ok = await self.close_window(wid)
+            return AgentResult(
+                success=ok,
+                output=f"Close requested for {wid}" if ok else f"Window {wid} not found",
+            )
+
+        if any(kw in intent for kw in ("move", "reposition")):
+            wid = params.get("window_id", "")
+            pos = params.get("position", {})
+            if not wid:
+                return AgentResult(success=False, error="No window_id specified for move")
+            ok = await self.move_window(
+                wid,
+                Vec3(x=pos.get("x", 0), y=pos.get("y", 1.5), z=pos.get("z", 2.5)),
+            )
+            return AgentResult(success=ok, output=f"Moved {wid}" if ok else f"Window {wid} not found")
+
+        if any(kw in intent for kw in ("resize", "scale")):
+            wid = params.get("window_id", "")
+            size = params.get("size", {})
+            if not wid:
+                return AgentResult(success=False, error="No window_id specified for resize")
+            ok = await self.resize_window(
+                wid,
+                WindowSize(width=size.get("width", 0.8), height=size.get("height", 0.5)),
+            )
+            return AgentResult(success=ok, output=f"Resized {wid}" if ok else f"Window {wid} not found")
+
+        if any(kw in intent for kw in ("rotate", "turn", "tilt")):
+            wid = params.get("window_id", "")
+            rot = params.get("rotation", {})
+            if not wid:
+                return AgentResult(success=False, error="No window_id specified for rotate")
+            ok = await self.rotate_window(
+                wid,
+                Quat(
+                    x=rot.get("x", 0), y=rot.get("y", 0),
+                    z=rot.get("z", 0), w=rot.get("w", 1),
+                ),
+            )
+            return AgentResult(success=ok, output=f"Rotated {wid}" if ok else f"Window {wid} not found")
+
+        if any(kw in intent for kw in ("focus", "select", "bring to front")):
+            wid = params.get("window_id", "")
+            if not wid:
+                return AgentResult(success=False, error="No window_id specified for focus")
+            ok = await self.focus_window(wid)
+            return AgentResult(success=ok, output=f"Focused {wid}" if ok else f"Window {wid} not found")
+
+        if any(kw in intent for kw in ("list", "show windows", "active windows")):
+            workspace = params.get("workspace_index")
+            windows = await self.list_windows(workspace)
+            summaries = [
+                f"  • {w.window_id}: {w.title} [{w.state.value}] "
+                f"pos=({w.transform.position.x:.1f}, {w.transform.position.y:.1f}, {w.transform.position.z:.1f})"
+                for w in windows
+            ]
+            return AgentResult(
+                output=f"Active windows ({len(windows)}):\n" + "\n".join(summaries) if summaries else "No active windows.",
+                data={"count": len(windows), "windows": [w.model_dump(mode="json") for w in windows]},
+            )
+
+        if any(kw in intent for kw in ("arrange", "layout", "tile", "organize")):
+            mode = params.get("layout_mode", "curved_arc")
+            workspace = params.get("workspace_index", 0)
+            count = await self.arrange_layout(workspace, mode)
+            return AgentResult(
+                output=f"Arranged {count} window(s) in '{mode}' layout",
+                data={"arranged_count": count, "mode": mode},
+            )
+
+        # Fallback: uninterpretable intent
+        return AgentResult(
+            success=False,
+            error=f"Could not interpret window intent: {ctx.intent!r}",
+        )
+
+    # ── Private Helpers ─────────────────────────────────────────────────
+
+    async def _execute_direct(self, tool_name: str, args: dict[str, Any]) -> AgentResult:
+        """Execute a tool command directly without AI interpretation."""
+        if tool_name in ("window_create", "create"):
+            pos = args.get("position")
+            pos_vec = Vec3(**pos) if isinstance(pos, dict) else pos
+            sz = args.get("size")
+            sz_obj = WindowSize(**sz) if isinstance(sz, dict) else sz
+            anchor = args.get("anchor", WindowAnchor.WORLD_FIXED)
+            if isinstance(anchor, str):
+                anchor = WindowAnchor(anchor)
+            win = await self.create_window(
+                title=args.get("title", "Untitled"),
+                app_id=args.get("app_id", ""),
+                workspace_index=args.get("workspace_index", 0),
+                position=pos_vec,
+                size=sz_obj,
+                anchor=anchor,
+            )
+            return AgentResult(
+                output=f"Created window '{win.title}' ({win.window_id})",
+                data={"window_id": win.window_id, "title": win.title},
+            )
+
+        if tool_name in ("window_close", "close"):
+            wid = args.get("window_id", "")
+            if not wid:
+                return AgentResult(success=False, error="No window_id specified for close")
+            ok = await self.close_window(wid)
+            return AgentResult(
+                success=ok,
+                output=f"Close requested for {wid}" if ok else f"Window {wid} not found",
+            )
+
+        if tool_name in ("window_move", "move"):
+            wid = args.get("window_id", "")
+            pos = args.get("position", {})
+            pos_vec = Vec3(**pos) if isinstance(pos, dict) else pos
+            if not wid or not pos_vec:
+                return AgentResult(success=False, error="window_id and position required for move")
+            ok = await self.move_window(wid, pos_vec, animate=args.get("animate", True))
+            return AgentResult(success=ok, output=f"Moved {wid}" if ok else f"Window {wid} not found")
+
+        if tool_name in ("window_resize", "resize"):
+            wid = args.get("window_id", "")
+            size = args.get("size", {})
+            size_obj = WindowSize(**size) if isinstance(size, dict) else size
+            if not wid or not size_obj:
+                return AgentResult(success=False, error="window_id and size required for resize")
+            ok = await self.resize_window(wid, size_obj, animate=args.get("animate", True))
+            return AgentResult(success=ok, output=f"Resized {wid}" if ok else f"Window {wid} not found")
+
+        if tool_name in ("window_rotate", "rotate"):
+            wid = args.get("window_id", "")
+            rot = args.get("rotation", {})
+            rot_obj = Quat(**rot) if isinstance(rot, dict) else rot
+            if not wid or not rot_obj:
+                return AgentResult(success=False, error="window_id and rotation required for rotate")
+            ok = await self.rotate_window(wid, rot_obj, animate=args.get("animate", True))
+            return AgentResult(success=ok, output=f"Rotated {wid}" if ok else f"Window {wid} not found")
+
+        if tool_name in ("window_focus", "focus"):
+            wid = args.get("window_id", "")
+            if not wid:
+                return AgentResult(success=False, error="No window_id specified for focus")
+            ok = await self.focus_window(wid)
+            return AgentResult(success=ok, output=f"Focused {wid}" if ok else f"Window {wid} not found")
+
+        if tool_name in ("window_list", "list"):
+            workspace = args.get("workspace_index")
+            windows = await self.list_windows(workspace)
+            return AgentResult(
+                output=f"Active windows: {len(windows)}",
+                data={"count": len(windows), "windows": [w.model_dump(mode="json") for w in windows]},
+            )
+
+        if tool_name in ("window_layout", "layout"):
+            mode = args.get("layout_mode", "curved_arc")
+            workspace = args.get("workspace_index", 0)
+            count = await self.arrange_layout(workspace, mode)
+            return AgentResult(
+                output=f"Arranged {count} window(s) in '{mode}' layout",
+                data={"arranged_count": count, "mode": mode},
+            )
+
+        return AgentResult(success=False, error=f"Unknown tool_name: {tool_name}")
+
+    async def _publish_command(self, cmd: WindowCommand) -> None:
+        """Serialize a WindowCommand and publish it to the EventBus."""
+        suffix = cmd.type.value.split(".")[-1]
+        topic = f"window.command.{suffix}"
+        await self._event_bus.publish(topic, cmd.model_dump(mode="json"))
+
+    # ── Spatial Layout Algorithms ───────────────────────────────────────
+
+    def _compute_spawn_position(self, existing_windows: list[VRWindow]) -> Vec3:
+        """Compute an optimal spawn position for a new window.
+
+        Strategy:
+          1. If no existing windows, place at center front.
+          2. Otherwise, find the largest angular gap between existing
+             windows on the cylindrical arc and place the new window
+             in the middle of that gap.
+        """
+        if not existing_windows:
+            return Vec3(x=0.0, y=_DEFAULT_HEIGHT, z=_DEFAULT_RADIUS)
+
+        # Compute angles of existing windows (atan2 from center)
+        angles: list[float] = []
+        for w in existing_windows:
+            px = w.transform.position.x
+            pz = w.transform.position.z
+            angle = math.degrees(math.atan2(px, pz))
+            angles.append(angle)
+
+        angles.sort()
+
+        # Find the largest gap
+        max_gap = 0.0
+        best_angle = 0.0
+
+        for i in range(len(angles)):
+            next_i = (i + 1) % len(angles)
+            gap = angles[next_i] - angles[i]
+            if next_i == 0:
+                gap += 360.0
+            if gap > max_gap:
+                max_gap = gap
+                best_angle = angles[i] + gap / 2.0
+
+        # Clamp to comfort arc
+        best_angle = max(-_ARC_HALF_ANGLE, min(_ARC_HALF_ANGLE, best_angle))
+
+        rad = math.radians(best_angle)
+        return Vec3(
+            x=_DEFAULT_RADIUS * math.sin(rad),
+            y=_DEFAULT_HEIGHT,
+            z=_DEFAULT_RADIUS * math.cos(rad),
+        )
+
+    def _layout_curved_arc(
+        self, windows: list[VRWindow],
+    ) -> list[tuple[Vec3, Quat]]:
+        """Compute positions along a curved arc for the given windows."""
+        n = len(windows)
+        if n == 0:
+            return []
+
+        if n == 1:
+            return [(
+                Vec3(x=0.0, y=_DEFAULT_HEIGHT, z=_DEFAULT_RADIUS),
+                Quat.identity(),
+            )]
+
+        results: list[tuple[Vec3, Quat]] = []
+        total_angle = min(2 * _ARC_HALF_ANGLE, n * 20.0)  # adaptive spread
+        start_angle = -total_angle / 2.0
+        step = total_angle / (n - 1) if n > 1 else 0.0
+
+        for i in range(n):
+            angle_deg = start_angle + i * step
+            angle_rad = math.radians(angle_deg)
+
+            pos = Vec3(
+                x=_DEFAULT_RADIUS * math.sin(angle_rad),
+                y=_DEFAULT_HEIGHT,
+                z=_DEFAULT_RADIUS * math.cos(angle_rad),
+            )
+            rot = Quat.from_euler_y(angle_deg)
+            results.append((pos, rot))
+
+        return results
+
+    def _layout_flat_grid(
+        self, windows: list[VRWindow],
+    ) -> list[tuple[Vec3, Quat]]:
+        """Compute positions in a flat grid arrangement."""
+        n = len(windows)
+        if n == 0:
+            return []
+
+        cols = min(n, _GRID_COLUMNS)
+        rows = math.ceil(n / cols)
+
+        # Compute total grid dimensions
+        avg_width = sum(w.size.width for w in windows) / n
+        avg_height = sum(w.size.height for w in windows) / n
+        cell_w = avg_width + _GRID_PADDING
+        cell_h = avg_height + _GRID_PADDING
+        total_w = cols * cell_w
+        total_h = rows * cell_h
+
+        results: list[tuple[Vec3, Quat]] = []
+        identity = Quat.identity()
+
+        for i in range(n):
+            row = i // cols
+            col = i % cols
+
+            x = (col * cell_w) - (total_w / 2.0) + (cell_w / 2.0)
+            y = _DEFAULT_HEIGHT + ((rows - 1 - row) * cell_h) - (total_h / 2.0) + (cell_h / 2.0)
+
+            pos = Vec3(x=x, y=y, z=_DEFAULT_RADIUS)
+            results.append((pos, identity))
+
+        return results

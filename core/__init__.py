@@ -12,18 +12,6 @@ from core.types import (
     ToolCall,
     ToolResult,
 )
-from core.vr_types import (
-    Quaternion3D,
-    Vector3D,
-    WindowCommand,
-    WindowCommandType,
-    WindowContentType,
-    WindowEvent,
-    WindowEventType,
-    WindowLayoutMode,
-    WindowSize,
-    WindowState,
-)
 
 __all__ = [
     "Config",
@@ -37,15 +25,4 @@ __all__ = [
     "TaskStatus",
     "ToolCall",
     "ToolResult",
-    "Vector3D",
-    "Quaternion3D",
-    "WindowSize",
-    "WindowState",
-    "WindowCommand",
-    "WindowCommandType",
-    "WindowEvent",
-    "WindowEventType",
-    "WindowContentType",
-    "WindowLayoutMode",
 ]
-

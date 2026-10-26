@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.UI;
 using Nexus.VR.UI;
+using Nexus.VR.Window;
 
 namespace Nexus.VR.Areas
 {
@@ -39,11 +40,26 @@ namespace Nexus.VR.Areas
             "Workspace 3 (Monitoring)"
         };
 
-        private int activeWindowCount = 3;
+        /// <summary>
+        /// Optional reference to the VRWindowManager for live window counts.
+        /// Set via <see cref="SetWindowManager"/> during initialization.
+        /// When null, falls back to a static counter for backward compatibility.
+        /// </summary>
+        private VRWindowManager _windowManager;
+        private int _fallbackWindowCount = 0;
 
         public string ActiveWorkspaceName => workspaces[activeWorkspaceIndex];
         public WindowLayoutMode LayoutMode => layoutMode;
         public IReadOnlyList<string> Workspaces => workspaces;
+
+        /// <summary>
+        /// Live window count for the active workspace.
+        /// Uses VRWindowManager when available, otherwise falls back to static counter.
+        /// </summary>
+        public int ActiveWindowCount =>
+            _windowManager != null
+                ? _windowManager.GetWindowsByWorkspace(activeWorkspaceIndex).Count
+                : _fallbackWindowCount;
 
         public event Action<int, string> OnWorkspaceChanged;
         public event Action<WindowLayoutMode> OnLayoutModeChanged;
@@ -52,6 +68,20 @@ namespace Nexus.VR.Areas
         {
             areaName = "Workspace Area";
             UpdateUI();
+        }
+
+        /// <summary>
+        /// Inject the VRWindowManager for live window count queries.
+        /// Called by <see cref="Nexus.VR.Core.NexusVRManager"/> during initialization.
+        /// </summary>
+        public void SetWindowManager(VRWindowManager manager)
+        {
+            _windowManager = manager;
+
+            if (_windowManager != null)
+            {
+                _windowManager.OnWindowCountChanged += (_) => UpdateUI();
+            }
         }
 
         public void SwitchWorkspace(int index)
@@ -95,17 +125,19 @@ namespace Nexus.VR.Areas
             OnLayoutModeChanged?.Invoke(layoutMode);
         }
 
+        /// <summary>Increment fallback counter (for backward compat when no VRWindowManager).</summary>
         public void AddWindow()
         {
-            activeWindowCount++;
+            _fallbackWindowCount++;
             UpdateUI();
         }
 
+        /// <summary>Decrement fallback counter (for backward compat when no VRWindowManager).</summary>
         public void RemoveWindow()
         {
-            if (activeWindowCount > 0)
+            if (_fallbackWindowCount > 0)
             {
-                activeWindowCount--;
+                _fallbackWindowCount--;
                 UpdateUI();
             }
         }
@@ -118,7 +150,7 @@ namespace Nexus.VR.Areas
             }
             if (windowCountText != null)
             {
-                windowCountText.text = $"Windows: {activeWindowCount}";
+                windowCountText.text = $"Windows: {ActiveWindowCount}";
             }
             if (layoutModeText != null)
             {
@@ -127,3 +159,4 @@ namespace Nexus.VR.Areas
         }
     }
 }
+

@@ -188,6 +188,11 @@ class EnvironmentContext:
         """The currently active workspace, or ``None``."""
         return next((ws for ws in self._workspaces if ws.is_active), None)
 
+    @property
+    def workspaces(self) -> list[WorkspaceInfo]:
+        """Return the current workspace metadata in insertion order."""
+        return list(self._workspaces)
+
     # ── Focused window ───────────────────────────────────────────────────
 
     def update_focused_window(self, window: WindowInfo) -> None:

@@ -128,6 +128,8 @@ DEFAULT_TOOL_CLASSIFICATIONS: dict[str, tuple[ActionCategory, RiskLevel]] = {
 
 # Default scope to risk/category mapping fallback (when tool name is unlisted)
 DEFAULT_SCOPE_CLASSIFICATIONS: dict[str, tuple[ActionCategory, RiskLevel]] = {
+    "window.interact": (ActionCategory.SENSITIVE, RiskLevel.MEDIUM),
+    "ai.request": (ActionCategory.NORMAL, RiskLevel.LOW),
     "system.read": (ActionCategory.READ_ONLY, RiskLevel.LOW),
     "app.list": (ActionCategory.READ_ONLY, RiskLevel.LOW),
     "fs.read": (ActionCategory.READ_ONLY, RiskLevel.LOW),

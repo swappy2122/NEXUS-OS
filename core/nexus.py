@@ -21,7 +21,6 @@ from agents.registry import AgentRegistry
 from agents.supervisor import SupervisorAgent
 from agents.system_agent import SystemAgent
 from agents.types import AgentContext, ToolCallRecord
-from agents.window_agent import WindowAgent
 from context.manager import ContextManager
 from core.config import Config
 from core.constants import SYSTEM_NAME, VERSION
@@ -63,7 +62,6 @@ from tools.system_tools import (
     SystemOsTool,
     SystemProcessesTool,
 )
-from tools.window_tools import create_window_tools
 
 logger = logging.getLogger("nexus.core")
 
@@ -239,12 +237,8 @@ class NexusCore:
             AppCloseTool(),
         ]
 
-        # Instantiate window agent & tools (VR Window Manager)
-        window_agent = WindowAgent()
-        window_tools = create_window_tools(window_agent)
-
         # Register tools in system registry
-        for tool in file_tools + system_tools + app_tools + window_tools:
+        for tool in file_tools + system_tools + app_tools:
             tool_registry.register(tool)
 
         # 4. Models Layer — strategy + tier config from config
@@ -286,15 +280,10 @@ class NexusCore:
         app_agent.set_llm(model_router)
         app_agent.set_security_gate(permission_gate)
 
-        # WindowAgent: deterministic/non-AI spatial VR window manager
-        window_agent.register_tools(window_tools)
-        window_agent.set_security_gate(permission_gate)
-
         agent_registry = AgentRegistry()
         agent_registry.register(file_agent)
         agent_registry.register(system_agent)
         agent_registry.register(app_agent)
-        agent_registry.register(window_agent)
 
         # 7. Supervisor Agent
         supervisor = SupervisorAgent(agent_registry, context_manager)

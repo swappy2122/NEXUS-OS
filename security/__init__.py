@@ -34,6 +34,12 @@ from security.models import (
 )
 from security.permissions import PermissionGate
 from security.policy import DEFAULT_POLICIES, Policy
+from security.sessions import (
+    AuthenticatedSession,
+    CreatedSession,
+    InvalidSessionToken,
+    SessionManager,
+)
 
 __all__ = [
     # Models & Enums
@@ -47,6 +53,11 @@ __all__ = [
     "Policy",
     "DEFAULT_POLICIES",
     "PermissionGate",
+    # Sessions
+    "AuthenticatedSession",
+    "CreatedSession",
+    "InvalidSessionToken",
+    "SessionManager",
     # Exceptions
     "SecurityError",
     "PermissionDenied",

@@ -14,7 +14,7 @@ import json
 import logging
 import re
 import shlex
-from typing import Any
+from typing import Any, AsyncIterator
 
 from core.types import ModelResponse
 from models.base_backend import BaseModelBackend
@@ -35,6 +35,17 @@ class DevModelBackend(BaseModelBackend):
     async def is_available(self) -> bool:
         """Always available as it requires no external services."""
         return True
+
+    async def stream_chat(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        **kwargs: Any,
+    ) -> AsyncIterator[str]:
+        """Provide one deterministic chunk for local tests."""
+        response = await self.chat(messages, tools=tools, **kwargs)
+        if response.content:
+            yield response.content
 
     async def chat(
         self,

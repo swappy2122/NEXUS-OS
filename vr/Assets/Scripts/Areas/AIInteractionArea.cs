@@ -1,8 +1,10 @@
 using System;
 using System.Collections.Generic;
+using System.Text;
 using UnityEngine;
 using UnityEngine.UI;
 using Nexus.VR.UI;
+using Nexus.VR.Window;
 
 namespace Nexus.VR.Areas
 {
@@ -44,6 +46,8 @@ namespace Nexus.VR.Areas
             "[System] NEXUS VR Shell initialized.",
             "[AI] Ready. Gaze or point to interact."
         };
+        private readonly Dictionary<string, StringBuilder> responseBuffers = new Dictionary<string, StringBuilder>();
+        private readonly HashSet<string> completedResponses = new HashSet<string>();
 
         public AIStatusState CurrentState => currentState;
         public IReadOnlyList<string> TranscriptHistory => transcriptHistory;
@@ -111,6 +115,64 @@ namespace Nexus.VR.Areas
             transcriptHistory.Clear();
             AddTranscriptEntry("[System] Transcript history cleared.");
             SetStatusState(AIStatusState.Idle);
+        }
+
+        /// <summary>
+        /// Consume one validated AI protocol envelope on Unity's main thread.
+        /// Chunks are isolated by response_id and never replace another response.
+        /// </summary>
+        public void HandleProtocolMessage(string json)
+        {
+            NexusEnvelope envelope = NexusMessageParser.ParseEnvelope(json);
+            if (envelope == null || envelope.topic != NexusProtocol.TopicAI) return;
+
+            switch (envelope.message_type)
+            {
+                case NexusProtocol.TypeAIState:
+                    var state = JsonUtility.FromJson<NexusAIStateMessage>(json);
+                    SetStatusState(ParseStatus(state.payload.state));
+                    break;
+                case NexusProtocol.TypeAIToken:
+                    var token = JsonUtility.FromJson<NexusAITokenMessage>(json);
+                    if (string.IsNullOrEmpty(token.payload.response_id)) return;
+                    if (completedResponses.Contains(token.payload.response_id)) return;
+                    if (!responseBuffers.TryGetValue(token.payload.response_id, out var buffer))
+                    {
+                        buffer = new StringBuilder();
+                        responseBuffers[token.payload.response_id] = buffer;
+                    }
+                    buffer.Append(token.payload.token ?? "");
+                    SetStatusState(AIStatusState.Responding);
+                    if (token.payload.is_final)
+                    {
+                        AddTranscriptEntry("[AI] " + buffer.ToString());
+                        responseBuffers.Remove(token.payload.response_id);
+                        completedResponses.Add(token.payload.response_id);
+                        SetStatusState(AIStatusState.Idle);
+                    }
+                    break;
+                case NexusProtocol.TypeAIError:
+                    var error = JsonUtility.FromJson<NexusAIErrorMessage>(json);
+                    if (string.IsNullOrEmpty(error.payload.response_id)
+                        || completedResponses.Contains(error.payload.response_id)) return;
+                    responseBuffers.Remove(error.payload.response_id);
+                    completedResponses.Add(error.payload.response_id);
+                    AddTranscriptEntry("[AI Error] " + (error.payload.error ?? "Response failed"));
+                    SetStatusState(AIStatusState.Error);
+                    break;
+            }
+        }
+
+        private static AIStatusState ParseStatus(string state)
+        {
+            switch (state)
+            {
+                case "thinking": return AIStatusState.Thinking;
+                case "responding": return AIStatusState.Responding;
+                case "listening": return AIStatusState.Listening;
+                case "error": return AIStatusState.Error;
+                default: return AIStatusState.Idle;
+            }
         }
 
         private void RefreshTranscript()

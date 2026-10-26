@@ -2,7 +2,7 @@ using System;
 using UnityEngine;
 using Nexus.VR.Areas;
 using Nexus.VR.UI;
-using Nexus.VR.WindowManager;
+using Nexus.VR.Window;
 
 namespace Nexus.VR.Core
 {
@@ -24,8 +24,9 @@ namespace Nexus.VR.Core
         [SerializeField] private WorkspaceArea workspaceArea;
         [SerializeField] private AIInteractionArea aiInteractionArea;
 
-        [Header("Window Manager")]
+        [Header("Window Management")]
         [SerializeField] private VRWindowManager windowManager;
+        [SerializeField] private VRBridgeClient bridgeClient;
 
         [Header("System HUD")]
         [SerializeField] private SpatialHUD systemHud;
@@ -38,6 +39,7 @@ namespace Nexus.VR.Core
         public WorkspaceArea WorkspaceArea => workspaceArea;
         public AIInteractionArea AIInteractionArea => aiInteractionArea;
         public VRWindowManager WindowManager => windowManager;
+        public VRBridgeClient BridgeClient => bridgeClient;
         public SpatialHUD SystemHud => systemHud;
         public VRCameraController CameraController => cameraController;
 
@@ -91,35 +93,36 @@ namespace Nexus.VR.Core
                 };
             }
 
-            // Wire window manager events to workspace area
-            if (windowManager != null)
+            if (bridgeClient != null && aiInteractionArea != null)
             {
-                windowManager.OnWindowCreated += (windowId) =>
-                {
-                    if (workspaceArea != null) workspaceArea.AddWindow();
-                    Debug.Log($"[NEXUS VR] Window created: {windowId}");
-                };
+                bridgeClient.OnProtocolMessage += aiInteractionArea.HandleProtocolMessage;
+            }
 
-                windowManager.OnWindowClosed += (windowId) =>
-                {
-                    if (workspaceArea != null) workspaceArea.RemoveWindow();
-                    Debug.Log($"[NEXUS VR] Window closed: {windowId}");
-                };
+            // Connect window manager to workspace area for live window counts
+            if (windowManager != null && workspaceArea != null)
+            {
+                workspaceArea.SetWindowManager(windowManager);
 
-                windowManager.OnWindowFocused += (windowId) =>
+                windowManager.OnWindowCountChanged += (count) =>
                 {
                     if (systemHud != null)
                     {
-                        var win = windowManager.GetWindow(windowId);
-                        if (win != null) systemHud.SetStatus($"Window: {win.Title}");
+                        systemHud.SetStatus($"Windows: {count}");
                     }
                 };
-
-                Debug.Log($"[NEXUS VR] VRWindowManager initialized ({windowManager.WindowCount} windows)");
             }
 
-            Debug.Log("[NEXUS VR] All spatial areas (Application, Workspace, AI Interaction) and HUD ready.");
+            Debug.Log("[NEXUS VR] All spatial areas (Application, Workspace, AI Interaction), Window Manager, and HUD ready.");
             OnShellReady?.Invoke();
+        }
+
+        private void OnDestroy()
+        {
+            if (bridgeClient != null && aiInteractionArea != null)
+            {
+                bridgeClient.OnProtocolMessage -= aiInteractionArea.HandleProtocolMessage;
+            }
+            if (instance == this) instance = null;
         }
 
         public void FocusArea(NexusArea area)
